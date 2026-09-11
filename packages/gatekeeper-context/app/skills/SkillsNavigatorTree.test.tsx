@@ -294,7 +294,8 @@ describe("SkillsNavigatorTree", () => {
     });
   });
 
-  it("starts inline renaming from a skill context menu", () => {
+  it("starts inline renaming after the skill context menu closes", () => {
+    vi.useFakeTimers();
     renderTree(true);
 
     act(() => row("Incident Response")?.dispatchEvent(new MouseEvent("contextmenu", {
@@ -305,6 +306,8 @@ describe("SkillsNavigatorTree", () => {
       .find((item) => item.textContent?.includes("Rename"));
     act(() => rename?.click());
 
+    expect(container?.querySelector('[aria-label="Rename skill"]')).toBeNull();
+    act(() => vi.advanceTimersByTime(0));
     expect(container?.querySelector('[aria-label="Rename skill"]')).not.toBeNull();
   });
 });
