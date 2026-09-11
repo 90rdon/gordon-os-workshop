@@ -78,7 +78,7 @@ import {
 | `./credential-expiry` | Durable, deduplicated `credentialsExpired()` notification. | An account has a Workshop connect callback to notify. |
 | `./auth-retry` | One refresh and replay without account adjudication. | A token flow has no `CredentialSource`; otherwise use `CredentialSource.run()`. |
 | `./cache` | Authority-partitioned Durable Object TTL caching. | Provider reads repeat and reconnects must fence stale fills. |
-| `./cursors` | Array, page-number, offset, and continuation-token cursors. | A session returns more rows than one RPC reply should carry. |
+| `./cursors` | Array, page-number, offset, and continuation-token cursors, and `PageHookCursor`, which runs a hook on each page of a cursor the gatekeeper already built. | A session returns more rows than one RPC reply should carry. |
 | `./actions` | Action declaration, approval, application, retention, and journaling. | An operation has an externally visible side effect. |
 | `./action-files` | Bounded, integrity-checked action-file storage. | A queued action carries file bytes. Store only its `ActionFileReference` in the action. |
 | `./action-description` | Approval-text builder: prose plus exact typed fields under one byte budget, and the `descriptionIsComplete` claim. | An action's `describe` renders what it will write or send. |
@@ -89,6 +89,9 @@ import {
 | `./endpoint` | User-supplied provider endpoint normalization. | A user enters a self-hosted provider URL. |
 | `./http-errors` | HTTP access-error classification and ACL probes. | A verifier distinguishes no access from provider failure. |
 | `./response-body` | Strict byte-capped response decoding. | A gatekeeper reads any provider response body. |
+| `./git-transport` | Git smart-HTTP framing: protocol-v2 fetch (pkt-line, filter specs, sideband demux into `GitCache.consumePack()`) and send-pack ref updates. | A gatekeeper implements `Gatekeeper.gitPull()` or a `push` action against a git host; it supplies only the URL, auth, and timeouts as a fetch callback. |
+| `./git-objects` | Commit-id validation, raw commit-object parsing, and commit advertising (`advertiseCommits`, and `advertisePages` as a `PageHookCursor` hook). | A session returns commit ids (advertise them) or simulates reads of commits queued for push from their local bytes. |
+| `./git-diff` | Tree-to-tree diff over an injected `TreeDiffSource`, producing the unified-patch hunk shape agents see. | A pull/merge request's source branch has queued pushes and the provider cannot compute the diff yet. |
 
 ## Internal modules
 
