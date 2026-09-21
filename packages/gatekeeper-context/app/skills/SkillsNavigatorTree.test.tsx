@@ -296,7 +296,7 @@ describe("SkillsNavigatorTree", () => {
 
   it("starts inline renaming after the skill context menu closes", () => {
     vi.useFakeTimers();
-    renderTree(true);
+    renderTree({ writable: true });
 
     act(() => row("Incident Response")?.dispatchEvent(new MouseEvent("contextmenu", {
       bubbles: true,
