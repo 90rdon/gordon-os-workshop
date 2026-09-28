@@ -28,7 +28,7 @@ import {
   getAiGatewayLogCost,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, CHAT_CHANGE_MESSAGE_BUDGET, ChatBindingEntry, SeedBindingInfo, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type CompactionCheckpoint, type StoredAssistantMessage, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
+import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, CHAT_CHANGE_MESSAGE_BUDGET, ChatBindingEntry, SeedBindingInfo, runAgent, summarizeArgs, type AgentStepChange, type AgentStepUsage, type AiChatMessageBodyWithModelData, type ChatHistory, type CompactionCheckpoint, type StoredAssistantMessage, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
 import { GitImpl } from "./git-binding";
 import { scanWorkpieceForGrep, type GrepScan } from "./grep";
@@ -3702,8 +3702,7 @@ class OverseerImpl implements AgentHooks {
         addedBindings: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[],
         worktreeCommits: {worktreeId: WorkpieceId, commit: string, previousHead: string}[],
       },
-      totalTokens?: number, aiGatewayLogId?: string, aiGatewayLogRoute?: AiGatewayLogRoute,
-      estimatedCost?: number): Promise<boolean> {
+      usage?: AgentStepUsage): Promise<boolean> {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) return false;  // chat deleted mid-turn
 
@@ -3829,8 +3828,7 @@ class OverseerImpl implements AgentHooks {
           }
         }
 
-        this.addChatMessages(chatId, author, msgs, totalTokens, aiGatewayLogId,
-                             aiGatewayLogRoute, estimatedCost);
+        this.addChatMessages(chatId, author, msgs, usage);
         return this.materializeChatChanges(chatId, undefined, {
           author,
           allowDuringTurn: true,
@@ -8487,8 +8485,7 @@ class OverseerImpl implements AgentHooks {
 
   addChatMessages(chatId: number, author: AiChatAuthorInfo,
         msgs: AiChatMessageBodyWithModelData[],
-        totalTokens?: number, aiGatewayLogId?: string,
-        aiGatewayLogRoute?: AiGatewayLogRoute, estimatedCost?: number): void {
+        usage?: AgentStepUsage): void {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
       // Chat thread deleted?
@@ -8577,21 +8574,33 @@ class OverseerImpl implements AgentHooks {
       }
     }
 
-    if (totalTokens !== undefined) {
-      meta.totalTokens = totalTokens;
+    if (usage?.totalTokens !== undefined) {
+      meta.totalTokens = usage.totalTokens;
+    }
+
+    // Cumulative, unlike totalTokens: what the chat has already spent on prompts stays spent,
+    // so compaction (which clears totalTokens) must not reset it.
+    if (usage?.promptTokens !== undefined) {
+      let total = meta.promptTokens ?? {uncached: 0, cacheRead: 0, cacheWrite: 0};
+      meta.promptTokens = {
+        uncached: total.uncached + usage.promptTokens.uncached,
+        cacheRead: total.cacheRead + usage.promptTokens.cacheRead,
+        cacheWrite: total.cacheWrite + usage.promptTokens.cacheWrite,
+      };
     }
 
     meta.lastActive = this.getChatTimestamp();
     this.storage.chatMeta.put(meta);
 
-    if (aiGatewayLogId && aiGatewayLogRoute) {
+    if (usage?.aiGatewayLogId && usage.aiGatewayLogRoute) {
       // Best-effort UI accounting only. The log ID is not persisted, so a DO restart can lose
       // this update. Do not use this total as a billing source of truth.
-      void this.#getCostFromAiGateway(chatId, aiGatewayLogRoute, aiGatewayLogId, estimatedCost);
-    } else if (estimatedCost) {
+      void this.#getCostFromAiGateway(
+          chatId, usage.aiGatewayLogRoute, usage.aiGatewayLogId, usage.estimatedCost);
+    } else if (usage?.estimatedCost) {
       // No AI Gateway log to consult (direct provider access, or a gateway response that didn't
       // surface a log id): fall back to the caller's catalog-priced estimate.
-      this.#addChatCost(chatId, estimatedCost);
+      this.#addChatCost(chatId, usage.estimatedCost);
     }
   }
 

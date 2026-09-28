@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, type ChatPromptTokens, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -434,6 +434,31 @@ export function makeStoredAssistantMessage(message: AssistantMessage): StoredAss
 }
 
 /**
+ * What one model step spent, as the agent loop reports it to AgentHooks.commitAgentStep. The
+ * counts come straight from pi's Usage for that step; the overseer folds them into the chat's
+ * metadata and prices the step. Every field is absent for a step no live model produced.
+ */
+export type AgentStepUsage = {
+  /** Prompt plus output tokens the model reported for this one step. */
+  totalTokens?: number;
+
+  /** This step's prompt tokens by cache disposition, added to the chat's running totals. */
+  promptTokens?: ChatPromptTokens;
+
+  /** pi's catalog-priced estimate for the step, in dollars. */
+  estimatedCost?: number;
+
+  /**
+   * The AI Gateway log this step produced. With `aiGatewayLogRoute`, the authoritative cost is
+   * fetched from it asynchronously and `estimatedCost` is only the fallback.
+   */
+  aiGatewayLogId?: string;
+
+  /** Where to look `aiGatewayLogId` up. */
+  aiGatewayLogRoute?: AiGatewayLogRoute;
+};
+
+/**
  * Methods of OverseerImpl that runAgent() needs to call, extracted as an interface to avoid cyclic
  * dependencies.
  * TODO(cleanup): This is getting a bit large, and there's a lot of state that is passed into the
@@ -462,10 +487,8 @@ export interface AgentHooks {
    * caller in overseer.ts). The rows' `changeApplied` broadcasts supersede the tool calls'
    * streamed edit previews.
    *
-   * The accounting parameters match the overseer's addChatMessages: when both `aiGatewayLogId`
-   * and `aiGatewayLogRoute` are present, the authoritative cost is fetched asynchronously from
-   * the AI Gateway log, with `estimatedCost` (pi's catalog-priced estimate from the turn's
-   * token usage, in dollars) as the fallback; otherwise the estimate is applied directly.
+   * `usage` is what the step spent (see AgentStepUsage); the overseer records it on the chat
+   * and prices the step from it.
    */
   commitAgentStep(chatId: number, author: AiChatAuthorInfo,
       msgs: AiChatMessageBodyWithModelData[],
@@ -476,8 +499,7 @@ export interface AgentHooks {
         addedBindings: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[],
         worktreeCommits: {worktreeId: WorkpieceId, commit: string, previousHead: string}[],
       },
-      totalTokens?: number, aiGatewayLogId?: string, aiGatewayLogRoute?: AiGatewayLogRoute,
-      estimatedCost?: number): Promise<boolean>;
+      usage?: AgentStepUsage): Promise<boolean>;
 
   /**
    * The history one agent pass replays (see ChatHistory). Read fresh before each pass, since a
@@ -3825,8 +3847,17 @@ async function runAgentPass(
         if (await hooks.commitAgentStep(chatId, author, msgs,
             {changes: stepChanges, createdGadgets, createdWorktrees, addedBindings,
              worktreeCommits},
-            message.usage.totalTokens, handle.lastResponse?.aiGatewayLogId,
-            handle.aiGatewayLogRoute, message.usage.cost.total)) {
+            {
+              totalTokens: message.usage.totalTokens,
+              promptTokens: {
+                uncached: message.usage.input,
+                cacheRead: message.usage.cacheRead,
+                cacheWrite: message.usage.cacheWrite,
+              },
+              estimatedCost: message.usage.cost.total,
+              aiGatewayLogId: handle.lastResponse?.aiGatewayLogId,
+              aiGatewayLogRoute: handle.aiGatewayLogRoute,
+            })) {
           ++nextChangeId;
         }
 

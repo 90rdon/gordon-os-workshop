@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { AiChatAuthorInfo, AiChatMetadata } from "@gadgets/workshop-shared/api";
-import type { AiGatewayLogRoute } from "../src/ai-gateway.js";
+import type { AgentStepUsage } from "../src/agent.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
@@ -37,9 +37,7 @@ describe("AI Gateway cost persistence", () => {
             chatId: number,
             author: AiChatAuthorInfo,
             messages: [],
-            totalTokens?: number,
-            logId?: string,
-            route?: AiGatewayLogRoute,
+            usage?: AgentStepUsage,
           ): void;
         };
       };
@@ -50,10 +48,13 @@ describe("AI Gateway cost persistence", () => {
         lastActive: new Date(0),
       });
 
-      overseer.impl.addChatMessages(7, AUTHOR, [], undefined, "log-id", {
-        accountId: "gateway-account-id",
-        gateway: "platform-gateway",
-        apiToken: "read-run-token",
+      overseer.impl.addChatMessages(7, AUTHOR, [], {
+        aiGatewayLogId: "log-id",
+        aiGatewayLogRoute: {
+          accountId: "gateway-account-id",
+          gateway: "platform-gateway",
+          apiToken: "read-run-token",
+        },
       });
 
       await vi.waitFor(() => {
@@ -63,4 +64,38 @@ describe("AI Gateway cost persistence", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   }, 5000);
+
+  it("accumulates prompt tokens across steps, so a chat's cache share covers the whole chat",
+      async () => {
+    const stub = env.TEST_OVERSEER.getByName("prompt-token-accounting");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const overseer = instance as unknown as {
+        impl: {
+          storage: { chatMeta: {
+            put(meta: AiChatMetadata): void;
+            get(id: number): AiChatMetadata | undefined;
+          } };
+          addChatMessages(
+            chatId: number, author: AiChatAuthorInfo, messages: [], usage?: AgentStepUsage): void;
+        };
+      };
+      overseer.impl.storage.chatMeta.put(
+        { id: 9, title: "Chat", started: new Date(0), lastActive: new Date(0) });
+
+      // A cold first step writes the prefix; the next reads it back.
+      overseer.impl.addChatMessages(9, AUTHOR, [], {
+        totalTokens: 1_200,
+        promptTokens: { uncached: 200, cacheRead: 0, cacheWrite: 800 },
+      });
+      overseer.impl.addChatMessages(9, AUTHOR, [], {
+        totalTokens: 1_400,
+        promptTokens: { uncached: 100, cacheRead: 800, cacheWrite: 100 },
+      });
+
+      const meta = overseer.impl.storage.chatMeta.get(9);
+      expect(meta?.promptTokens).toEqual({ uncached: 300, cacheRead: 800, cacheWrite: 900 });
+      // totalTokens still measures only the last step, so it cannot stand in for this.
+      expect(meta?.totalTokens).toBe(1_400);
+    });
+  });
 });

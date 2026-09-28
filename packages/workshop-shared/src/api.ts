@@ -2584,6 +2584,15 @@ export type AiChatMetadata = {
   totalCost?: number;
 
   /**
+   * Prompt tokens this conversation has sent to the model, by how the provider's prompt cache
+   * served each one. Cumulative over the chat -- unlike `totalTokens`, which measures one step --
+   * so `cacheRead / (uncached + cacheRead + cacheWrite)` is the share served from cache. Absent
+   * until a step reports usage; a provider that reports no cache figures leaves both cache counts
+   * at zero. Survives compaction, which resets `totalTokens` but does not un-spend what was sent.
+   */
+  promptTokens?: ChatPromptTokens;
+
+  /**
    * First sequence this chat still replays. Everything before it is covered by a compaction
    * checkpoint; those messages remain in canonical history but no longer drive current-state reads.
    */
@@ -2601,6 +2610,22 @@ export type AiChatMetadata = {
    * first submitCodeChange() simply passes `generation: 0, revision: 0`.
    */
   codeBase?: ChatCodeBase;
+};
+
+/**
+ * A chat's cumulative prompt tokens (see AiChatMetadata.promptTokens), split by how the
+ * provider's prompt cache served them. The three counts are disjoint and sum to every prompt
+ * token the chat has sent.
+ */
+export type ChatPromptTokens = {
+  /** Tokens the provider processed fresh, with no cache entry to serve them. */
+  uncached: number;
+
+  /** Tokens a cache entry served, which the provider did not process again. */
+  cacheRead: number;
+
+  /** Tokens written into a cache entry, which a later request with the same prefix can read. */
+  cacheWrite: number;
 };
 
 /**

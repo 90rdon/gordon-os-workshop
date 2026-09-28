@@ -1,8 +1,9 @@
 import type { RpcPromise, RpcStub } from "capnweb";
 import type {
   ActionHistoryFilter, ActionHistoryPage, AiChatAuthorInfo, AiChatHistoryPage, AiChatMessage,
-  AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiModelConfig, AuthenticatedApi, GadgetClient,
-  Overseer, PublicApi, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber,
+  AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiModelConfig, AuthenticatedApi,
+  ChatPromptTokens, GadgetClient, Overseer, PublicApi, WorkpieceId, WorkpieceSummary,
+  WorkpiecesSubscriber,
 } from "@gadgets/workshop-shared/api";
 import type { CodeChange } from "@gadgets/workshop-shared/code-change";
 import {
@@ -50,6 +51,8 @@ export type AgentTurnResult = {
   usage: {
     lastStepTokens?: number;
     observedCumulativeChatCostUsd?: number;
+    /** The chat's cumulative prompt tokens by cache disposition, when a step reported them. */
+    promptTokens?: ChatPromptTokens;
   };
 };
 
@@ -819,6 +822,9 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
     if (metadata.totalTokens !== undefined) usage.lastStepTokens = metadata.totalTokens;
     if (metadata.totalCost !== undefined) {
       usage.observedCumulativeChatCostUsd = metadata.totalCost;
+    }
+    if (metadata.promptTokens !== undefined) {
+      usage.promptTokens = { ...metadata.promptTokens };
     }
     this.#lastHistory = history;
     this.#lastWorkpieces = workpieces;
