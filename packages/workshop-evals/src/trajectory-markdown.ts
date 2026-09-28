@@ -60,12 +60,17 @@ function trial(assertion: Assertion, index: number): string {
   const { taskId } = run.session.metadata;
   const minutes = (assertion.duration / 60_000).toFixed(1);
   const cost = run.usage.metadata.observedCumulativeChatCostUsd;
+  const tokens = run.usage.metadata.promptTokens;
+  const prompt = tokens === undefined
+    ? 0 : tokens.uncached + tokens.cacheRead + tokens.cacheWrite;
   const lines = [
     `## ${taskId} · ${run.usage.model} · trial ${index} — ${assertion.status} (${minutes} min)`,
     "",
     `Model turns ${run.output.metrics.modelTurns} · tool calls ${run.output.metrics.toolCalls} · ` +
       `tool errors ${run.output.metrics.toolErrors}` +
-      (cost === undefined ? "" : ` · cost $${cost.toFixed(4)}`),
+      (cost === undefined ? "" : ` · cost $${cost.toFixed(4)}`) +
+      (tokens === undefined || prompt === 0
+        ? "" : ` · cache ${Math.round((tokens.cacheRead / prompt) * 100)}%`),
   ];
   for (const [turn, { outcome, checks }] of run.output.turns.entries()) {
     lines.push("", `Turn ${turn + 1}: ${outcome.status}` +

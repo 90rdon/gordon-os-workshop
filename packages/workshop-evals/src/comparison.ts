@@ -12,6 +12,11 @@ export type EvalStats = {
   /** Null when any trial lacks a cost: a mean over a subset would not compare across sides. */
   meanCostUsd: number | null;
   /**
+   * The share of prompt tokens the provider's cache served, averaged over the trials. Null when
+   * any trial lacks the counts: a mean over a subset would not compare across sides.
+   */
+  meanCacheHitRate: number | null;
+  /**
    * Each check that failed, as `t<turn> <check id>`, with how many trials failed it and the
    * evidence of the first. Most frequent first.
    */
@@ -85,6 +90,14 @@ function stats({ assertions }: Cohort): EvalStats {
     const cost = assertion.meta.harness.run.usage.metadata.observedCumulativeChatCostUsd;
     return cost === undefined ? [] : [cost];
   });
+  // Prompt tokens are cumulative per trial, so each trial contributes one rate and the mean is
+  // over trials, not over tokens: one long trial must not outvote the rest.
+  const cacheHitRates = assertions.flatMap(assertion => {
+    const tokens = assertion.meta.harness.run.usage.metadata.promptTokens;
+    if (tokens === undefined) return [];
+    const prompt = tokens.uncached + tokens.cacheRead + tokens.cacheWrite;
+    return prompt === 0 ? [] : [tokens.cacheRead / prompt];
+  });
   const runs = assertions.map(assertion => assertion.meta.harness.run);
   const metrics = runs.map(run => run.output.metrics);
   const failedChecks = countBy(runs.flatMap(run => run.output.turns.flatMap((turn, index) =>
@@ -106,6 +119,8 @@ function stats({ assertions }: Cohort): EvalStats {
     meanToolCalls: mean(metrics.map(value => value.toolCalls)),
     meanToolErrors: mean(metrics.map(value => value.toolErrors)),
     meanCostUsd: costs.length === assertions.length ? mean(costs) : null,
+    meanCacheHitRate:
+      cacheHitRates.length === assertions.length ? mean(cacheHitRates) : null,
     failedChecks: failedChecks.map(({ item, count }) => ({ ...item, trials: count })),
     toolErrors: toolErrors.map(({ item, count }) => ({ ...item, count })),
     infrastructureErrors: infrastructureErrors.map(({ item, count }) => ({ message: item, trials: count })),
@@ -230,11 +245,17 @@ function score(side: EvalStats): string {
   return `${Math.round(passRate(side) * 100)}%`;
 }
 
-/** The pass-rate change, in percentage points. */
-function passChange(row: ComparedRow): string {
-  const delta = (passRate(row.candidate) - passRate(row.baseline)) * 100;
+/** A change in percentage points, signed, or unsigned when it is zero. */
+function percentagePoints(delta: number): string {
   const sign = delta > 0 ? "+" : delta < 0 ? "\u2212" : "";
   return `${sign}${Math.abs(delta).toFixed(0)}${NBSP}pp`;
+}
+
+/** The cache-hit-rate change, on its own line, or nothing when a side never measured it. */
+function cacheChange(row: EvalComparisonRow): string {
+  const before = row.baseline?.meanCacheHitRate;
+  const after = row.candidate?.meanCacheHitRate;
+  return before == null || after == null ? "" : `<br>${percentagePoints((after - before) * 100)}`;
 }
 
 /** A p-value to two decimals, or a bound where two decimals would round it to zero. */
@@ -250,9 +271,10 @@ function sides(row: EvalComparisonRow, value: (side: EvalStats) => string | null
 
 /**
  * Render the comparison for a pull request comment: the verdict, then one table with each task's
- * score on both sides, its change and Fisher test, and each side's average minutes, cost and
- * steps per run. Headers are short so the table fits a comment's width unwrapped. Bonk's review
- * explains the failures.
+ * score on both sides, its change and Fisher test, and each side's average minutes, cost, prompt
+ * cache hit rate and steps per run. The cache cell carries its own change, since a prompt-cache
+ * regression shows up there rather than in the score. Headers are short so the table fits a
+ * comment's width unwrapped. Bonk's review explains the failures.
  */
 export function renderEvalComparison(comparison: EvalComparison): string {
   const { rows } = comparison;
@@ -277,8 +299,8 @@ export function renderEvalComparison(comparison: EvalComparison): string {
   const lines = [
     "# Eval results", "",
     `**Verdict: ${VERDICT[comparison.verdict]}.** ${why}`, "",
-    "| Task | Score | \u0394 score | Fisher test | Avg min | Avg $ | Avg steps |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
+    "| Task | Score | \u0394 score | Fisher test | Avg min | Avg $ | Cache | Avg steps |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
   ];
   for (const row of rows) {
     const fisher = row.reason !== null ? "\u2014"
@@ -286,9 +308,14 @@ export function renderEvalComparison(comparison: EvalComparison): string {
       : pValueText(row.pValue);
     lines.push(`| ${[
       name(row), sides(row, score),
-      row.reason === null ? passChange(row) : `_${row.reason}_`, fisher,
+      row.reason === null
+        ? percentagePoints((passRate(row.candidate) - passRate(row.baseline)) * 100)
+        : `_${row.reason}_`,
+      fisher,
       sides(row, side => (side.meanDurationMs / 60_000).toFixed(1)),
       sides(row, side => side.meanCostUsd?.toFixed(3) ?? null),
+      sides(row, side => side.meanCacheHitRate === null
+        ? null : `${Math.round(side.meanCacheHitRate * 100)}%`) + cacheChange(row),
       sides(row, side => side.meanModelTurns.toFixed(1)),
     ].join(" | ")} |`);
   }

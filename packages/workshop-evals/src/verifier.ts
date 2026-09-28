@@ -35,6 +35,27 @@ export function resolveGadget(
   return match.id;
 }
 
+/**
+ * Check that the workspace holds exactly these Gadget titles. The agent's system prompt lists
+ * every Gadget with its files and bindings, so an unplanned creation or rename rewrites the
+ * prompt prefix and costs the conversation everything cached behind it. A turn asked to extend
+ * one Gadget, or only to answer a question, must leave the inventory alone. Worktrees are not
+ * checked: the system prompt deliberately omits them, so they cost nothing.
+ */
+export async function checkGadgetInventory(
+    verifier: EvalVerifier, id: string, titles: readonly string[]): Promise<void> {
+  await verifier.check(id, async () => {
+    const gadgets = verifier.workpieces
+      .filter(workpiece => workpiece.type === "gadget")
+      .map(workpiece => workpiece.title).toSorted();
+    const expected = [...titles].toSorted();
+    return {
+      pass: JSON.stringify(gadgets) === JSON.stringify(expected),
+      evidence: { gadgets, expected },
+    };
+  });
+}
+
 /** The agent's chat messages after `sinceSequence`, in order. */
 export function agentReplies(
     history: readonly AiChatMessage[], sinceSequence: number): string[] {

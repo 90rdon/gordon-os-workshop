@@ -18,6 +18,7 @@ type TrialOptions = {
   toolCalls?: number;
   toolErrors?: number;
   cost?: number;
+  promptTokens?: { uncached: number; cacheRead: number; cacheWrite: number };
   errors?: { name: string; message: string }[];
   outcomeStatus?: "completed" | "error" | "timedOut" | "cancelled";
   checks?: { id: string; pass: boolean; evidence?: string }[];
@@ -35,6 +36,7 @@ function trial(options: TrialOptions = {}) {
     toolCalls = 3,
     toolErrors = 0,
     cost,
+    promptTokens,
     errors = [],
     outcomeStatus = "completed",
     checks = [],
@@ -49,7 +51,10 @@ function trial(options: TrialOptions = {}) {
           session: { metadata: { taskId, taskVersion, gitCommit }, events },
           usage: {
             model: MODEL,
-            metadata: cost === undefined ? {} : { observedCumulativeChatCostUsd: cost },
+            metadata: {
+              ...(cost === undefined ? {} : { observedCumulativeChatCostUsd: cost }),
+              ...(promptTokens === undefined ? {} : { promptTokens }),
+            },
           },
           output: {
             metrics: { modelTurns, toolCalls, toolErrors },
@@ -115,6 +120,7 @@ it("compares three-trial task cohorts", () => {
       meanToolCalls: 3,
       meanToolErrors: 1 / 3,
       meanCostUsd: (0.1 + 0.2 + 0.3) / 3,
+      meanCacheHitRate: null,
       ...noFailures,
     },
     candidate: {
@@ -125,6 +131,7 @@ it("compares three-trial task cohorts", () => {
       meanToolCalls: 3,
       meanToolErrors: 0,
       meanCostUsd: (0.2 + 0.3 + 0.4) / 3,
+      meanCacheHitRate: null,
       ...noFailures,
     },
   }]);
@@ -132,7 +139,7 @@ it("compares three-trial task cohorts", () => {
   expect(markdown).toContain("**Verdict: \u26AA Unchanged.**");
   // A 33 pp rise over three trials is noise, so it is not marked significant.
   expect(markdown).toContain("| project-doc | 67% \u2192 100% | +33 pp | p = 1.00 | " +
-    "2.0 \u2192 3.0 | 0.200 \u2192 0.300 | 2.0 \u2192 2.0 |");
+    "2.0 \u2192 3.0 | 0.200 \u2192 0.300 | \u2014 \u2192 \u2014 | 2.0 \u2192 2.0 |");
 });
 
 it("calls a significant fall a regression and a small one noise", () => {
@@ -181,6 +188,42 @@ it("does not compare costs from different trial populations", () => {
   expect(row.baseline?.meanCostUsd).toBeNull();
   expect(row.candidate?.meanCostUsd).toBeCloseTo(0.3);
   expect(rendered(comparison)).toContain("| \u2014 \u2192 0.300 |");
+});
+
+it("reports the prompt cache hit rate and its change", () => {
+  // A run that rewrites the cached prefix every turn against one that appends to it: the same
+  // prompt tokens, moved from a fresh read into a cache hit.
+  const churned = { uncached: 600, cacheRead: 200, cacheWrite: 200 };
+  const appended = { uncached: 100, cacheRead: 800, cacheWrite: 100 };
+  const comparison = compareEvalResults(
+    report([trial({ promptTokens: churned }), trial({ promptTokens: churned })]),
+    report([
+      trial({ gitCommit: HEAD_SHA, promptTokens: appended }),
+      trial({ gitCommit: HEAD_SHA, promptTokens: appended }),
+    ]),
+    SHAS);
+
+  const row = comparison.rows[0];
+  expect(row.baseline?.meanCacheHitRate).toBeCloseTo(0.2);
+  expect(row.candidate?.meanCacheHitRate).toBeCloseTo(0.8);
+  expect(rendered(comparison)).toContain("| 20% \u2192 80%<br>+60 pp |");
+});
+
+it("does not compare cache rates from different trial populations", () => {
+  const measured = { uncached: 500, cacheRead: 500, cacheWrite: 0 };
+  const comparison = compareEvalResults(
+    report([trial({ promptTokens: measured }), trial()]),
+    report([
+      trial({ gitCommit: HEAD_SHA, promptTokens: measured }),
+      trial({ gitCommit: HEAD_SHA, promptTokens: measured }),
+    ]),
+    SHAS);
+
+  const row = comparison.rows[0];
+  expect(row.baseline?.meanCacheHitRate).toBeNull();
+  expect(row.candidate?.meanCacheHitRate).toBeCloseTo(0.5);
+  // No change is shown: one side never measured it, so the difference would be meaningless.
+  expect(rendered(comparison)).toContain("| \u2014 \u2192 50% |");
 });
 
 it("separates infrastructure errors from failed agent outcomes", () => {

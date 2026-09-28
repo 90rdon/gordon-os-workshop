@@ -86,6 +86,7 @@ export function createWorkshopHarness(
           if (result.history.length > 0) history = result.history;
           const cumulativeCost = result.usage.observedCumulativeChatCostUsd ??
             usage.observedCumulativeChatCostUsd;
+          const promptTokens = result.usage.promptTokens ?? usage.promptTokens;
           usage = {};
           if (result.usage.lastStepTokens !== undefined) {
             usage.lastStepTokens = result.usage.lastStepTokens;
@@ -93,6 +94,7 @@ export function createWorkshopHarness(
           if (cumulativeCost !== undefined) {
             usage.observedCumulativeChatCostUsd = cumulativeCost;
           }
+          if (promptTokens !== undefined) usage.promptTokens = promptTokens;
           const verificationStartedAt = Date.now();
           const verificationDeadline = verificationStartedAt + verificationBudget;
           if (result.outcome.status !== "completed" || signal?.aborted) {
@@ -230,6 +232,7 @@ export function createWorkshopHarness(
       if (usage.observedCumulativeChatCostUsd !== undefined) {
         usageMetadata.observedCumulativeChatCostUsd = usage.observedCumulativeChatCostUsd;
       }
+      if (usage.promptTokens !== undefined) usageMetadata.promptTokens = usage.promptTokens;
       const events: TranscriptEvent[] = toTranscriptEvents(history);
       if (unrecordedPrompt !== undefined) {
         events.push({
