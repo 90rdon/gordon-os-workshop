@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { defineTaskEval } from "../src/eval.js";
 import { defineEvalTask } from "../src/task.js";
-import type { EvalVerifier } from "../src/verifier.js";
+import { checkGadgetInventory, type EvalVerifier } from "../src/verifier.js";
 
 // An on-call desk where several responders acknowledge the same page at the same instant. Durable
 // Object RPC calls interleave at every `await`, so a check-then-write acknowledge hands one incident
@@ -57,6 +57,9 @@ const TITLE = "Incident Desk";
 const RESPONDERS = Array.from({ length: 20 }, (_unused, index) => `oncall-${index + 1}`);
 /** The severities the simultaneous opens of race-open carry; attempt N's summary names N. */
 const RACE_OPEN_SEVERITIES = [1, 2, 3, 1, 2, 3, 1, 2];
+/** The incidents the load turn asks for, and the responders that race for each of them. */
+const LOAD_INCIDENTS = ["load-1", "load-2", "load-3", "load-4", "load-5"] as const;
+const LOAD_RESPONDERS = ["rota-a", "rota-b", "rota-c", "rota-d"] as const;
 
 function code(result: Ok | Ack): string {
   return result.ok ? "ok" : result.error;
@@ -374,6 +377,60 @@ null when there is nothing to average. Everything already on the board stays.`,
       });
 
       await checkBoardOrder(verifier, "board-order-survives-escalation");
+      await checkGadgetInventory(verifier, "extending-the-desk-adds-no-gadget", [TITLE]);
+    },
+  }, {
+    prompt: `Before I put this in front of the rota I want to see it hold up. Open five incidents
+with the ids load-1 to load-5, all on service "payments" at severity 2, then for each of them
+fire four acknowledge attempts at the same instant from responders ${
+      LOAD_RESPONDERS.join(", ")} -- genuinely at once, not one after another. Then tell me who
+ended up owning each one.
+
+Don't change the desk's code for this, and leave everything already on the board where it is.
+
+Reply in exactly this form and nothing else, one line per incident, load-1 first:
+<incident id> <owner>`,
+    verify: async verifier => {
+      await verifier.check("the-load-test-left-one-owner-per-incident", async () => {
+        using api = await verifier.connect<DeskApi>(TITLE);
+        const board = BoardSchema.parse(await api.board()).incidents;
+        const opened = LOAD_INCIDENTS.map(id => board.find(incident => incident.id === id));
+        const wrong = opened.flatMap((incident, index) => incident !== undefined &&
+          incident.service === "payments" && incident.severity === 2 &&
+          incident.status === "acknowledged" && incident.owner !== null &&
+          LOAD_RESPONDERS.includes(incident.owner) ? [] : [LOAD_INCIDENTS[index]]);
+        return { pass: wrong.length === 0, evidence: { wrong, opened } };
+      });
+
+      await verifier.check("reports-the-owners-the-board-actually-holds", async () => {
+        using api = await verifier.connect<DeskApi>(TITLE);
+        const board = BoardSchema.parse(await api.board()).incidents;
+        // Who won each race is decided at run time, so the reply can only be checked against the
+        // board: an agent that did not really run it cannot name the winners.
+        const owners = LOAD_INCIDENTS.map(id =>
+          `${id} ${board.find(incident => incident.id === id)?.owner ?? "?"}`);
+        const reply = verifier.replies.at(-1)?.trim().replace(/^```\w*\n?|\n?```$/g, "").trim() ?? "";
+        const stated = reply.split("\n").map(line =>
+          line.trim().replace(/^[-*\s]+/, "").replaceAll("`", "").replace(/\s+/g, " ").trim())
+          .filter(line => line !== "");
+        return {
+          pass: JSON.stringify(stated) === JSON.stringify(owners),
+          evidence: { reply, stated, owners },
+        };
+      });
+
+      await verifier.check("the-incidents-that-were-already-there-are-untouched", async () => {
+        using api = await verifier.connect<DeskApi>(TITLE);
+        const board = BoardSchema.parse(await api.board()).incidents;
+        const ids = Object.keys(TURN_ONE_BOARD);
+        const changed = ids.flatMap(id => {
+          const now = board.find(incident => incident.id === id);
+          return now !== undefined && keptByTurnOne.has(asKept(now)) ? [] : [id];
+        });
+        return { pass: changed.length === 0, evidence: { changed } };
+      });
+
+      await checkGadgetInventory(verifier, "load-testing-adds-no-gadget", [TITLE]);
     },
   }],
 });

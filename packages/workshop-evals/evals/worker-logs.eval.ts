@@ -2,7 +2,7 @@ import { z } from "zod";
 import { Seeded } from "./seeded.js";
 import { defineTaskEval } from "../src/eval.js";
 import { defineEvalTask } from "../src/task.js";
-import type { EvalVerifier } from "../src/verifier.js";
+import { checkGadgetInventory, type EvalVerifier } from "../src/verifier.js";
 
 // A day of Workers request logs for six Workers across four colos, generated from a fixed seed with
 // one planted bad hour. The agent builds the analyzer, extends it, then is asked what the data
@@ -190,6 +190,43 @@ const WORST = referenceWorstHour();
 if (WORST.worker !== PLANTED.worker || WORST.hour !== PLANTED.hour) {
   throw new Error(`Seeded data no longer plants the worst hour where the task expects it: ${
     JSON.stringify(WORST)}`);
+}
+
+/**
+ * The day's two halves, and how much a worker+route pair's p95 must rise between them to count
+ * as degraded. The threshold sits in the gap the seeded data leaves between the pairs that did
+ * slow down and the ones that only drifted, so the answer is a set, not a ranking cut-off, and
+ * an agent that measures p95 correctly cannot land on the boundary.
+ */
+const FIRST_HALF = { fromIso: hourIso(0), toIso: hourIso(12) };
+const SECOND_HALF = { fromIso: hourIso(12), toIso: "2027-03-10T00:00:00Z" };
+const DEGRADED_BY_MS = 20;
+
+/** Every worker+route pair's p95 in each half of the day, worst degradation first. */
+function referenceHalves() {
+  return Object.entries(WORKERS)
+    .flatMap(([worker, profile]) => profile.routes.map(route => {
+      const first = p95(select({ ...FIRST_HALF, worker, route }));
+      const second = p95(select({ ...SECOND_HALF, worker, route }));
+      return { worker, route, first, second, delta: second - first };
+    }))
+    .toSorted((left, right) => right.delta - left.delta);
+}
+
+const HALVES = referenceHalves();
+const DEGRADED = HALVES.filter(pair => pair.delta > DEGRADED_BY_MS);
+// The question is fair only while the threshold falls in a gap: every pair that counts is clear
+// of it, every pair that does not is clear of it the other way, and no two that count tie, since
+// the reply is ordered.
+const MARGIN_MS = 4;
+const DELTAS = DEGRADED.map(pair => pair.delta);
+const NEXT_BELOW = Math.max(...HALVES.filter(pair => pair.delta <= DEGRADED_BY_MS)
+    .map(pair => pair.delta));
+if (DEGRADED.length < 3 || new Set(DELTAS).size !== DEGRADED.length ||
+    Math.min(...DELTAS) < DEGRADED_BY_MS + MARGIN_MS ||
+    NEXT_BELOW > DEGRADED_BY_MS - MARGIN_MS) {
+  throw new Error(`Seeded data no longer separates the degraded routes as the task expects: ${
+    JSON.stringify({ degraded: DEGRADED, nextBelow: NEXT_BELOW })}`);
 }
 
 // RPC contract.
@@ -422,15 +459,33 @@ The events I've already loaded must still be there.`,
       });
     },
   }, {
-    prompt: `Looking at the data I've loaded: which Worker had the worst single hour by error rate on
-${DAY}, and what was that hour's error rate? Answer in exactly this form and nothing else:
+    prompt: `Two questions about the data I've loaded, both for ${DAY}.
+
+First: which Worker had the worst single hour by error rate, and what was that hour's error rate?
+
+Second: something got slower as the day went on. Compare the first half of the day
+(00:00Z to 12:00Z) with the second (12:00Z to 24:00Z) and list every worker+route pair whose
+p95 rose by more than ${DEGRADED_BY_MS} ms between them, worst first. Both halves are half-open,
+the same as everywhere else.
+
+Answer in exactly this form and nothing else:
 worker: <name>
 hour: <YYYY-MM-DDTHH:00Z>
-error-rate: <percent with one decimal>`,
+error-rate: <percent with one decimal>
+degraded:
+<worker> <route> <first-half p95>ms -> <second-half p95>ms
+...one line per pair, worst first, or the single line \`none\``,
     verify: async verifier => {
-      await verifier.check("names-the-worst-hour-from-the-data", async () => {
+      const answer = () => {
         const reply = verifier.replies.at(-1)?.trim().replace(/^```\w*\n?|\n?```$/g, "").trim() ?? "";
-        const lines = reply.split("\n").map(line => line.trim()).filter(line => line !== "");
+        return {
+          reply,
+          lines: reply.split("\n").map(line => line.trim()).filter(line => line !== ""),
+        };
+      };
+
+      await verifier.check("names-the-worst-hour-from-the-data", async () => {
+        const { reply, lines } = answer();
         // The three fields, in the stated order, each on its own line.
         const field = (index: number, name: string) => {
           const line = lines[index] ?? "";
@@ -443,13 +498,30 @@ error-rate: <percent with one decimal>`,
         const rate = /^(\d+\.\d)\s*%?$/.exec(field(2, "error-rate") ?? "")?.[1];
         const expectedHour = hourIso(WORST.hour);
         return {
-          pass: lines.length === 3 && worker === WORST.worker && hour !== null &&
+          pass: worker === WORST.worker && hour !== null &&
             Date.parse(hour) === Date.parse(expectedHour) &&
             rate !== undefined && Math.abs(Number(rate) - WORST.errorRate * 100) <= 0.05,
           evidence: { reply, expected: { ...WORST, hourIso: expectedHour } },
         };
       });
+
+      await verifier.check("finds-every-route-that-slowed-down-over-the-day", async () => {
+        const { reply, lines } = answer();
+        const at = lines.findIndex(line => line.toLowerCase().startsWith("degraded:"));
+        const listed = at === -1 ? [] : lines.slice(at + 1);
+        const expected = DEGRADED.map(pair =>
+          `${pair.worker} ${pair.route} ${pair.first}ms -> ${pair.second}ms`);
+        const stated = listed.map(line =>
+          line.replace(/^[-*\s]+/, "").replaceAll("`", "").replaceAll("\u2192", "->")
+            .replace(/\s+/g, " ").trim());
+        return {
+          pass: at !== -1 && JSON.stringify(stated) === JSON.stringify(expected),
+          evidence: { reply, stated, expected },
+        };
+      });
+
       await checkSummaryStillMatches(verifier, "asking-a-question-changes-nothing");
+      await checkGadgetInventory(verifier, "asking-a-question-adds-no-gadget", [TITLE]);
     },
   }],
 });

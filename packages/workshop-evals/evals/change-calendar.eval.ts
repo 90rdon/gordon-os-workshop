@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { defineTaskEval } from "../src/eval.js";
 import { defineEvalTask } from "../src/task.js";
-import type { EvalVerifier } from "../src/verifier.js";
+import { checkGadgetInventory, type EvalVerifier } from "../src/verifier.js";
 
 // A week of maintenance for a small platform team, worked the way a person would: build the
 // calendar, write the week up as a document from it, change the rules, then ask it a question.
@@ -81,6 +81,15 @@ function sameWindows(actual: readonly Window[], expected: readonly Window[]): bo
   const key = (window: Window) => JSON.stringify(normalized(window));
   return JSON.stringify(actual.map(key)) === JSON.stringify(expected.map(key));
 }
+
+/**
+ * What the turn-3 rules reject about the windows already on the calendar, by id. The rules apply
+ * to new submissions only -- turn 3 keeps everything already scheduled -- so this is a judgement
+ * the agent has to reach from the rules rather than by resubmitting anything. Only the six-hour
+ * billing migration in week 43 breaks the new four-hour cap; no two windows for one service sit
+ * closer than the new 24-hour gap.
+ */
+const REJECTED_TODAY: readonly string[] = ["mw-106 INVALID_RANGE"];
 
 function sameIds(actual: readonly string[], expected: readonly string[]): boolean {
   return actual.length === expected.length && actual.every((id, index) => id === expected[index]);
@@ -400,18 +409,57 @@ instead of 8, still "INVALID_RANGE". Everything already scheduled stays exactly 
       });
     },
   }, {
-    prompt: `How many hours of maintenance are scheduled for api-gateway in the week of Monday 11
-to Sunday 17 October 2027? Reply with just the number and nothing else, like \`6.5\`.`,
+    prompt: `Two things, both answered from the calendar as it stands.
+
+First: how many hours of maintenance are scheduled for api-gateway in the week of Monday 11 to
+Sunday 17 October 2027?
+
+Second: the rules changed after most of this was booked. Go through every window on the
+calendar, whatever week it is in, and tell me which ones would be turned away if I tried to
+schedule them today, exactly as they stand. Leave what is booked alone -- I am asking what the
+rules say now, not asking you to enforce them.
+
+Reply in exactly this form and nothing else:
+hours: <number>
+rejects:
+<window id> <error code>
+...one line per window, lowest id first, or the single line \`none\``,
     verify: async verifier => {
+      const answer = () => {
+        const reply = verifier.replies.at(-1)?.trim().replace(/^```\w*\n?|\n?```$/g, "").trim() ?? "";
+        return {
+          reply,
+          lines: reply.split("\n").map(line => line.trim()).filter(line => line !== ""),
+        };
+      };
+
       await verifier.check("answers-with-the-number-from-the-calendar", async () => {
-        const reply = verifier.replies.at(-1)?.trim() ?? "";
-        const match = /^`?(\d+(?:\.\d+)?)`?\.?$/.exec(reply);
+        const { reply, lines } = answer();
+        const stated = lines[0]?.toLowerCase().startsWith("hours:")
+          ? lines[0].slice("hours:".length).trim().replace(/^`|`$/g, "") : null;
+        const match = /^(\d+(?:\.\d+)?)$/.exec(stated ?? "");
         return {
           pass: match !== null && Number(match[1]) === API_GATEWAY_HOURS,
-          evidence: { reply, replies: verifier.replies.length },
+          evidence: { reply, expected: API_GATEWAY_HOURS },
         };
       });
+
+      await verifier.check("knows-which-booked-windows-the-new-rules-would-turn-away", async () => {
+        const { reply, lines } = answer();
+        const at = lines.findIndex(line => line.toLowerCase().startsWith("rejects:"));
+        const listed = at === -1 ? [] : lines.slice(at + 1);
+        const stated = listed.map(line =>
+          line.replace(/^[-*\s]+/, "").replaceAll("`", "").replace(/\s+/g, " ").trim())
+          .filter(line => line.toLowerCase() !== "none");
+        return {
+          pass: at !== -1 && JSON.stringify(stated) === JSON.stringify([...REJECTED_TODAY]),
+          evidence: { reply, stated, expected: REJECTED_TODAY },
+        };
+      });
+
       await checkSeededWindowsIntact(verifier, "asking-a-question-changes-nothing");
+      await checkGadgetInventory(
+          verifier, "asking-a-question-adds-no-gadget", [CALENDAR, PLAN]);
     },
   }],
 });

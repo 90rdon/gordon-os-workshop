@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Seeded } from "./seeded.js";
 import { defineTaskEval } from "../src/eval.js";
 import { asEvidence, defineEvalTask } from "../src/task.js";
-import type { EvalVerifier } from "../src/verifier.js";
+import { checkGadgetInventory, type EvalVerifier } from "../src/verifier.js";
 
 // A complete chess engine, written from scratch because the Gadget sandbox has no packages, then
 // extended twice. Verification is differential: chess.js is the oracle, and the Gadget must agree
@@ -602,6 +602,7 @@ gameOver is true for checkmate or draw. Everything that already worked keeps wor
 
       await checkGames(verifier, "rules-still-agree-with-the-oracle-after-draws", [4],
           { plies: 50, fields: DRAW_STATUS, pgn: true });
+      await checkGadgetInventory(verifier, "adding-draw-detection-adds-no-gadget", [TITLE]);
     },
   }],
 });
