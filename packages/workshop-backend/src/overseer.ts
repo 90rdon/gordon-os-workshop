@@ -1559,6 +1559,25 @@ export function sanitizeMessageFormatRefs(
 // collaborator roles.
 type SessionKind = CollaboratorRole | "owner";
 
+// Who a gadget UI connection belongs to: what the gadget's connectViewer() is called with (see
+// OverseerImpl.getGadgetFacet). `id` and `name` are the viewer's profile's, as presence shows them.
+type GadgetViewer = {id: string, name: string, role: SessionKind};
+
+// Open `viewer`'s session with the gadget: whatever its connectViewer() returns, or the gadget
+// itself if it doesn't define one.
+async function connectGadgetViewer(gadget: Fetcher<DurableObject>, viewer: GadgetViewer)
+    : Promise<any> {
+  let connectViewer: (viewer: GadgetViewer) => Promise<unknown> =
+      Reflect.get(gadget, "connectViewer", gadget);
+  try {
+    return await Reflect.apply(connectViewer, gadget, [viewer]);
+  } catch (err) {
+    let missing = 'The RPC receiver does not implement the method "connectViewer".';
+    if (err instanceof Error && err.message === missing) return gadget;
+    throw err;
+  }
+}
+
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
@@ -5138,27 +5157,45 @@ class OverseerImpl implements AgentHooks {
   // mints; omitted for the owner's and for internal callers (binding loopbacks already live
   // inside a counted session).
   //
+  // `viewer` makes the stub that user's UI connection: its calls go to whatever the gadget's
+  // `connectViewer(viewer)` returns, or to the gadget itself if it defines no connectViewer(). It
+  // runs on the connection's first call rather than here, so a UI that never calls its server --
+  // a gadget with no server.js can't start one -- connects as before. A rejection fails only the
+  // calls awaiting it, so a transient one doesn't strand a UI that won't reconnect until reloaded.
+  // Disposing the stub disposes the viewer's session.
+  // No stub lets its holder call connectViewer() itself: only the Workshop names viewers.
+  //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
-  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind)
-      : Promise<RpcStub<any>> {
+  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
+      viewer?: GadgetViewer): Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
     let leaveSession = joinAs ? this.joinSession(joinAs) : undefined;
+    let viewerSession: Promise<any> | undefined;
 
     let self = this;
 
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
     let proxy = new Proxy(facet, {
       get(target, prop, receiver) {
-        // The lease ends when the client disposes the stub. (The DO reset that severs sessions
-        // releases it implicitly, by discarding this object -- and joinSession's leave is
-        // idempotent, so a double dispose is harmless.)
-        if (prop === Symbol.dispose && leaveSession) {
+        // The lease ends when the client disposes the stub, and so does the viewer's session.
+        // (The DO reset that severs sessions releases the lease implicitly, by discarding this
+        // object -- and joinSession's leave is idempotent, so a double dispose is harmless.)
+        if (prop === Symbol.dispose && (leaveSession || viewer)) {
           let inner = Reflect.get(target, prop, target);
           return () => {
-            leaveSession!();
+            leaveSession?.();
+            viewerSession?.then(session => session?.[Symbol.dispose]?.(), () => {});
             if (typeof inner === "function") Reflect.apply(inner, target, []);
           };
+        }
+
+        // connectGadgetViewer() calls the facet directly, so this blocks only holders of the stub
+        // -- a binding, the agent's executeCode, a UI whose session is the Gadget itself -- who
+        // could otherwise connect as anyone.
+        if (prop === "connectViewer") {
+          return () => Promise.reject(new Error("connectViewer() is reserved for the Workshop, " +
+              "which calls it for each UI connection."));
         }
 
         // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
@@ -5178,7 +5215,17 @@ class OverseerImpl implements AgentHooks {
         //   possibly a runtime bug which needs investigation.
         // TODO: Fix exception reporting it tail workers so we can remove this hack.
         return (...args: any[]) => {
-          let result: Promise<any> = Reflect.apply(method, target, args);
+          let result: Promise<any>;
+          if (viewer) {
+            let pending = viewerSession ??= connectGadgetViewer(target, viewer).catch(err => {
+              viewerSession = undefined;
+              throw err;
+            });
+            result = pending.then(session =>
+                Reflect.apply(Reflect.get(session, prop, session), session, args));
+          } else {
+            result = Reflect.apply(method, target, args);
+          }
           return result.catch((err: any) => {
             let msg = err;
             if (err instanceof Error) {
@@ -5244,8 +5291,8 @@ class OverseerImpl implements AgentHooks {
     return resolved.formats;
   }
 
-  async exportGadget(gadgetId: WorkpieceId, formatId: string, chatId?: number)
-      : Promise<ReadableStream<Uint8Array>> {
+  async exportGadget(gadgetId: WorkpieceId, formatId: string, viewer: GadgetViewer,
+      chatId?: number): Promise<ReadableStream<Uint8Array>> {
     this.checkChatExistsAndMaterializeChanges(chatId);
     let {formats, handler, gadget} = await this.#resolveGadgetExportFormats(gadgetId, chatId);
     if (!gadget) throw new Error("The Gadget server stub is unavailable.");
@@ -5263,7 +5310,9 @@ class OverseerImpl implements AgentHooks {
       let bundle = await this.getGadgetUiBundle(gadgetId, chatId);
       if (!bundle) throw new Error("This Gadget does not have a UI to export.");
       let title = this.getGadgetRecord(gadgetId).title;
-      return renderGadgetInBrowser(browser, bundle.jsCode, title, exportGadget.dup(), format);
+      // client.js renders for the exporting viewer, reaching its server as when they view it.
+      let viewerGadget = await this.getGadgetFacet(gadgetId, chatId, undefined, viewer);
+      return renderGadgetInBrowser(browser, bundle.jsCode, title, viewerGadget, format);
     }
   }
 
@@ -12524,6 +12573,11 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
         this.impl.logger);
   }
 
+  async #viewer(): Promise<GadgetViewer> {
+    let {id, name} = await retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger);
+    return {id, name, role: this.joinedAs ?? "owner"};
+  }
+
   async getId(): Promise<WorkpieceId> {
     return this.id;
   }
@@ -12555,7 +12609,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts exactly as this capability does (joinedAs): it can outlive this
     // object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, chatId, this.joinedAs);
+    return this.impl.getGadgetFacet(this.id, chatId, this.joinedAs, await this.#viewer());
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -12563,7 +12617,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
   }
 
   async export(formatId: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
-    return this.impl.exportGadget(this.id, formatId, chatId);
+    return this.impl.exportGadget(this.id, formatId, await this.#viewer(), chatId);
   }
 
   async listBindings(chatId?: number): Promise<GadgetBindingInfo[]> {
@@ -12793,6 +12847,11 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
         this.impl.logger);
   }
 
+  async #viewer(): Promise<GadgetViewer> {
+    let {id, name} = await retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger);
+    return {id, name, role: "use"};
+  }
+
   #deny(): never {
     throw new Error("Unauthorized: this collaborator only has permission to use the gadget's UI.");
   }
@@ -12826,7 +12885,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts as a "use" session for its own lifetime, like this interface: it can
     // outlive this object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, undefined, "use");
+    return this.impl.getGadgetFacet(this.id, undefined, "use", await this.#viewer());
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -12836,7 +12895,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
 
   async export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.exportGadget(this.id, id);
+    return this.impl.exportGadget(this.id, id, await this.#viewer());
   }
 
   // --- Denied methods (build-only) ---

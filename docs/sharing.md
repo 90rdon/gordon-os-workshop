@@ -29,6 +29,10 @@ A caller may never grant a role higher than their own effective role. Today only
 
 Authorization is capability-based: `open()` computes the caller's effective role from the permission graph and hands back a different object depending on the result. `build`/owner sessions get the full `OverseerClientInterface`; `use` sessions get a `UseOverseerInterface` that implements the entire `Overseer` interface but throws `Unauthorized` for everything outside the `use` allowlist (except the two inert telemetry subscriptions noted above). Presence is intentionally in the allowlist and exposes active viewers' names, profile IDs, and roles. Because that class `implements Overseer`, any newly-added interface method fails to compile until a developer consciously decides whether `use` callers may invoke it (default-deny).
 
+### Viewer identity
+
+A gadget's own code can learn who is using it. `connectToGadget()` (and a browser-mode export, which renders the UI for the exporting user) passes the caller's profile ID, name, and role (`owner`, `build`, or `use`) to the gadget's `connectViewer(viewer)`, if it defines one, and serves that connection from whatever it returns (`OverseerImpl.getGadgetFacet`). The ID and name are the ones presence already shows every viewer; the role is not presence's, which reports the owner as `build`. It is that of the capability making the connection, and a removal or downgrade restarts the Overseer (see "Terminating live sessions on revocation or scope growth" below), ending the gadget's sessions along with every other. Only the Workshop can call `connectViewer()`: every gadget stub it hands out -- to a UI, a binding, or the agent's `executeCode` -- refuses it, so none of those holders can connect as someone else. (A gadget that hands out a stub to itself, e.g. by returning `this` from `[restore]()`, gives that away.)
+
 ### Adding collaborators
 
 There are two ways to grant someone collaborator access:

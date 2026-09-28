@@ -849,11 +849,40 @@ DO NOT import \`RpcTarget\` in client.js. It is already imported.
 
 If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:workers".
 
+## Who is using the Gadget
+
+Everyone viewing a Gadget's UI is signed in to the Workshop: the owner, or a collaborator it was shared with. To know who, define \`connectViewer(viewer)\` on the Gadget class. When a UI connection makes its first call, the Workshop first calls \`connectViewer(viewer)\`, then sends that call and every later one on the connection to whatever it returns instead of to the Gadget: \`gadget.addNote()\` in client.js then invokes \`addNote()\` on the returned object. \`viewer\` is \`{id, name, role}\`: \`id\` identifies the user (it is stable and unique, e.g. their username or email address), \`name\` is their display name, and \`role\` is \`"owner"\`, \`"build"\` (a collaborator who may also change the Gadget), or \`"use"\` (a collaborator who may only use its UI). Return a new \`RpcTarget\` that remembers \`viewer\`, never the Gadget itself, which every connection shares. Throwing from \`connectViewer()\` refuses the viewer: the call fails with the thrown error, and their next call asks again. The returned object's \`[Symbol.dispose]()\` runs when their connection closes. Without \`connectViewer()\`, UI calls go to the Gadget, which can't tell viewers apart. Either way, other callers (your \`executeCode\`, other Gadgets bound to it) call the Gadget's own methods. Only the Workshop can call \`connectViewer()\`, so no caller can claim to be someone else, and \`executeCode\` cannot reach the returned object's methods.
+
+\`\`\`
+import { DurableObject, RpcTarget } from "cloudflare:workers";
+
+export class Gadget extends DurableObject {
+  connectViewer(viewer) {
+    return new ViewerSession(this, viewer);
+  }
+}
+
+class ViewerSession extends RpcTarget {
+  constructor(gadget, viewer) {
+    super();
+    this.gadget = gadget;
+    this.viewer = viewer;
+  }
+
+  addNote(text) {
+    let {kv} = this.gadget.ctx.storage;
+    let notes = kv.get("notes") ?? [];
+    notes.push({text, author: this.viewer.name, authorId: this.viewer.id});
+    kv.put("notes", notes);
+  }
+}
+\`\`\`
+
 ## Design Tips
 
 * ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
-* Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make any move. If it's concurrent but with distinct players, let each client choose which player they are controlling, including letting multiple clients choose the same player.
+* Clients may frequently reload, and there is no client-side storage, so a connection is not a long-lived "session": key anything a user expects to persist by their viewer \`id\` (see "Who is using the Gadget"). Don't assume one player per viewer, though, since one person may play several seats: if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make any move. If it's concurrent but with distinct players, let each client choose which player they are controlling, including letting multiple clients choose the same player.
 * If a Gadget contains a README.md file, use it to describe that Gadget at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
 
 ## Exporting files from Gadgets

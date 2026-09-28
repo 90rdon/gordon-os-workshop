@@ -4420,6 +4420,9 @@ export interface GadgetClient extends WorkpieceClient {
   // this stub into the gadget's iframe sandbox, so that the gadget UI can communicate with its
   // server side. It can also permit the coding agent to make direct calls.
   //
+  // The connection is the caller's own: a gadget that defines `connectViewer(viewer)` is told who
+  // the caller is, and serves the connection from whatever that returns instead of itself.
+  //
   // If `chatId` is specified, then the gadget will include changes currently proposed in the given
   // chat.
   //
