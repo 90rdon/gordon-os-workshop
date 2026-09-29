@@ -236,6 +236,12 @@ export type CompactionProjectionMessage = {
    * opens on a user or assistant message.
    */
   canCut?: boolean;
+
+  /**
+   * Set on an announcement of changed system prompt sections. Once compacted, the change folds into
+   * the leading system message instead of the summary.
+   */
+  promptUpdate?: boolean;
 };
 
 function projectionMessageWeight(message: Message): number {
@@ -285,10 +291,10 @@ export function buildSummaryPrompt(
     model: Model<Api>): Message[] {
   let turns: {role: "user" | "assistant", text: string}[] = [];
   // An earlier summary arrives as a `user` message with no sequence, so it is kept and the new
-  // summary supersedes it. (The coding-agent system prompt is not in the projection at all; the
-  // summarizer uses its own.)
-  for (let {message, sequence} of projection) {
-    if (sequence !== undefined && sequence >= compactedTo) continue;
+  // summary supersedes it. (The coding-agent system prompt and its section updates are not
+  // summarized; the summarizer uses its own prompt.)
+  for (let {message, sequence, promptUpdate} of projection) {
+    if (promptUpdate || (sequence !== undefined && sequence >= compactedTo)) continue;
     let text = flattenModelMessage(message);
     if (!text) continue;
     let role = message.role === "assistant" ? "assistant" as const : "user" as const;

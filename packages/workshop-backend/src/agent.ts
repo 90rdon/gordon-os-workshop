@@ -4,9 +4,10 @@ import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type Code
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { createWorkshopLogger } from "./observability";
-import { Type, toToolDeclaration } from "@earendil-works/pi-ai";
+import { Type, getSystemMessageText, renderSystemMessageUpdate, toToolDeclaration } from "@earendil-works/pi-ai";
 import type {
-  AssistantMessage, ImageContent, Message, TSchema, TextContent, ThinkingContent, ToolCall, Usage,
+  Api, AssistantMessage, ImageContent, Message, Model, SystemMessage, TSchema, TextContent,
+  ThinkingContent, ToolCall, Usage,
 } from "@earendil-works/pi-ai";
 import {
   runAgentLoopContinue, type AgentContext, type AgentEvent, type AgentTool,
@@ -204,6 +205,28 @@ export type AiChatAgentContext = {
    * that).
    */
   alwaysAvailableCapsuleIds?: WorkpieceId[];
+};
+
+/**
+ * One entry in a chat's record of its dynamic system prompt sections: the workspace's gadgets,
+ * standard formats, connectable vendors and ambient resources (see runAgentPass). The leading
+ * system message keeps the sections it started with, and later changes are replayed at their place
+ * in the conversation, so the prompt the provider has cached stays byte-identical.
+ */
+export type AiChatPromptSections = {
+  chatId: number;
+
+  /**
+   * The chat message these changes are replayed right after. Absent on the snapshot the leading
+   * system message starts from.
+   */
+  afterSequence?: number;
+
+  /**
+   * The changes in the order they were announced, each one message: every named section's text,
+   * or `null` for a section that no longer applies. The snapshot has one, the full set.
+   */
+  changes: Record<string, string | null>[];
 };
 
 /**
@@ -488,6 +511,16 @@ export interface AgentHooks {
 
   /** Publish a compaction checkpoint: later history loads start from it. */
   commitChatCompaction(chatId: number, checkpoint: CompactionCheckpoint): void;
+
+  /** The chat's prompt section entries (see AiChatPromptSections): the snapshot, then changes. */
+  listChatPromptSections(chatId: number): AiChatPromptSections[];
+
+  /**
+   * Records a change to the chat's prompt sections, after any recorded after the same chat message.
+   * Without `afterSequence`, records the snapshot.
+   */
+  recordChatPromptSections(
+      chatId: number, sections: Record<string, string | null>, afterSequence?: number): void;
 
   /**
    * The gadget's current head commit (WorkpieceSummary.commitId), or undefined if it has none:
@@ -1304,6 +1337,73 @@ function defineTool<TParameters extends TSchema>(def: AgentTool<TParameters>): A
   return def as unknown as AgentTool;
 }
 
+// The system prompt's section kinds in the order it lists them. A section that a change introduces
+// folds in after the last section of its kind (see applyPromptSectionChange), so in a compacted
+// chat's leading message, e.g., a new gadget still sits under the workspace heading.
+const PROMPT_SECTION_ORDER = [
+  "task", "bindings", "formats", "workspace", "gadget", "connections", "resources",
+];
+
+// Applies a change with pi's section semantics: a named section is replaced in place, and `null`
+// removes it.
+function applyPromptSectionChange(
+    sections: Record<string, string>,
+    change: Record<string, string | null>): Record<string, string> {
+  let entries = Object.entries(sections);
+  for (let [name, text] of Object.entries(change)) {
+    let index = entries.findIndex(([existing]) => existing === name);
+    if (text === null) {
+      if (index >= 0) entries.splice(index, 1);
+    } else if (index >= 0) {
+      entries[index] = [name, text];
+    } else {
+      let rank = PROMPT_SECTION_ORDER.indexOf(name.split(" ")[0]);
+      let next = entries.findIndex(([existing]) =>
+          PROMPT_SECTION_ORDER.indexOf(existing.split(" ")[0]) > rank);
+      entries.splice(next >= 0 ? next : entries.length, 0, [name, text]);
+    }
+  }
+  return Object.fromEntries(entries);
+}
+
+// The change that turns `from` into `to`, or undefined if they match.
+function diffPromptSections(
+    from: Record<string, string>,
+    to: Record<string, string>): Record<string, string | null> | undefined {
+  let change: Record<string, string | null> = {};
+  for (let name of Object.keys(from)) {
+    if (to[name] === undefined) change[name] = null;
+  }
+  for (let [name, text] of Object.entries(to)) {
+    if (from[name] !== text) change[name] = text;
+  }
+  return Object.keys(change).length > 0 ? change : undefined;
+}
+
+// Delivers a change to the prompt sections at its place in the conversation. pi renders a later
+// system message there only for a model that accepts one mid-conversation; for any other model it
+// folds the change back into the leading system message, which rewrites the whole cached prefix.
+// Those models get the same text as a machine-authored note instead, the way the checkpoint
+// summary is delivered.
+function promptSectionsUpdateMessage(
+    model: Model<Api>, sections: Record<string, string | null>): Message {
+  let update: SystemMessage = {role: "system", content: "", sections, timestamp: 0};
+  let compat = model.compat;
+  if (compat !== undefined && "supportsMidConvoSystemMessages" in compat &&
+      compat.supportsMidConvoSystemMessages === true) {
+    return update;
+  }
+  // Escaping rather than deleting a delimiter, which the text around it could reassemble.
+  let text = renderSystemMessageUpdate(update).replace(/<(?=\s*\/?\s*system_update\b)/gi, "&lt;");
+  return {
+    role: "user",
+    content:
+        `<system_update note="Automated update to your system prompt from the Workshop, not a ` +
+        `message from the user.">\n${text}\n</system_update>`,
+    timestamp: 0,
+  };
+}
+
 /**
  * Runs one agent turn against the chat's history, compacting as needed. A pass over the history
  * may compact instead of prompting the model, or end after a persisted tool step because the next
@@ -1850,7 +1950,7 @@ async function runAgentPass(
   };
 
   // Always-available resources (e.g. the Context Library) describe the agent's environment, so
-  // they're announced in the system prompt (slot 1, below) alongside the bindings list rather
+  // they're announced in the system prompt (a section, below) alongside the bindings list rather
   // than as a synthetic user turn.
   let alwaysAvailable = seedBindings.filter(seed => seed.catalog !== undefined);
   let alwaysAvailableResourcesPrompt = alwaysAvailable.length > 0
@@ -1870,7 +1970,38 @@ async function runAgentPass(
     applyReplayedChange(checkpoint.proposedChange, false);
   }
 
+  // The prompt sections (built below) as the conversation has already announced them. Entries
+  // recorded before the compacted prefix fold into the leading system message; each later change
+  // is replayed right after the chat message it follows, whether or not that message renders
+  // anything.
+  let leadingSections: Record<string, string> = {};
+  let recordedSectionChanges:
+      {afterSequence: number, sections: Record<string, string | null>}[] = [];
+  let hasSectionSnapshot = false;
+  for (let {afterSequence, changes} of hooks.listChatPromptSections(chatId)) {
+    hasSectionSnapshot ||= afterSequence === undefined;
+    for (let sections of changes) {
+      if (afterSequence === undefined || afterSequence < (checkpoint?.compactedTo ?? 0)) {
+        leadingSections = applyPromptSectionChange(leadingSections, sections);
+      } else {
+        recordedSectionChanges.push({afterSequence, sections});
+      }
+    }
+  }
+  let announcedSections = leadingSections;
+  let replayedSectionChanges = 0;
+  let replaySectionChanges = (beforeSequence: number) => {
+    for (; replayedSectionChanges < recordedSectionChanges.length; ++replayedSectionChanges) {
+      let {afterSequence, sections} = recordedSectionChanges[replayedSectionChanges];
+      if (afterSequence >= beforeSequence) break;
+      modelMessages.push(promptSectionsUpdateMessage(handle.model, sections));
+      modelMessageSources.push({sequence: afterSequence, canCut: false, promptUpdate: true});
+      announcedSections = applyPromptSectionChange(announcedSections, sections);
+    }
+  };
+
   for (let [msgIndex, msg] of chatMessages.entries()) {
+    replaySectionChanges(msg.sequence);
     let modelMessageStart = modelMessages.length;
     let msgTimestamp = msg.timestamp.getTime();
     switch (msg.type) {
@@ -2531,6 +2662,7 @@ async function runAgentPass(
       });
     }
   }
+  replaySectionChanges(Number.POSITIVE_INFINITY);
 
   // The step buffer: the current step's tool edits, applied to the session content as they
   // buffer but durable (and broadcast) only at the step's persistence barrier
@@ -2650,15 +2782,15 @@ async function runAgentPass(
       workpiece => hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId));
   let executeCodeStreamManager = new ExecuteCodeStreamManager(emitStreamEvent);
 
-  // Deployment-wide admin instructions, appended to the static system slot (slot 0) so they stay
-  // inside the Anthropic prompt cache window. "" when unset.
+  // Deployment-wide admin instructions, appended to the static part of the system prompt so they
+  // stay inside the prompt cache window. "" when unset.
   let instanceInstructions = formatInstanceInstructions(await hooks.getInstanceInstructions());
 
-  // The two system prompt slots: the non-project-specific parts, followed by the
-  // project-specific parts. Kept as a two-part construction (static slot first) so the shared
-  // prefix stays byte-stable for prompt caching; they are concatenated into the leading system
-  // message in pi's transcript below.
-  let systemPromptSlots: [string, string];
+  // The system prompt: text shared by every chat of this kind, then named sections describing this
+  // chat's environment. The leading system message keeps the sections as the chat first saw them
+  // (see leadingSections above), so the cached prefix stays byte-stable while they change.
+  let staticPrompt: string;
+  let currentSections: Record<string, string>;
 
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt. Spawned agents see only the
@@ -2680,36 +2812,32 @@ async function runAgentPass(
           `You have access to the following bindings via the \`env\` object:\n${lines.join("\n")}`;
     }
 
-    // Split the system prompt into static and dynamic parts for better caching. How the task is
-    // delivered depends on how the chat was spawned, and for a callable agent includes the
-    // chat-specific (but stable across the chat) interface, so that goes in the second slot.
-    systemPromptSlots = [
-      SPAWNER_SYSTEM_PROMPT,
-      [
-        agentContext.spawnerTypes
-            ? formatCallableAgentPrompt(agentContext.spawnerTypes)
-            : SPAWNED_TASK_PROMPT,
-        systemPromptBindings,
-        alwaysAvailableResourcesPrompt,
-      ].filter(part => part !== "").join("\n\n"),
-    ];
+    // How the task is delivered depends on how the chat was spawned, and for a callable agent
+    // includes the chat-specific (but stable across the chat) interface.
+    staticPrompt = SPAWNER_SYSTEM_PROMPT;
+    currentSections = {
+      task: agentContext.spawnerTypes
+          ? formatCallableAgentPrompt(agentContext.spawnerTypes)
+          : SPAWNED_TASK_PROMPT,
+      bindings: systemPromptBindings,
+    };
   } else {
     // This is a regular coding agent.
 
     // Let's include each gadget's list of files in the system prompt so that the agent doesn't
-    // have to call a tool to list files at the start of every thread. In order to avoid cache
-    // misses, we specifically list the files that existed at the start of the thread even if the
-    // agent adds or removes files during the thread. (An unpinned gadget's list can still change
-    // between turns if mainline moves -- a cache miss, but files rarely churn concurrently to a
-    // chat within the cache TTL.)
-    let systemPromptWorkspace: string;
+    // have to call a tool to list files at the start of every thread. Each gadget is its own
+    // section, so a change to one (a pinned gadget's list follows this chat's edits, an unpinned
+    // one's follows mainline) is announced without repeating the others.
+    let workspaceSections: Record<string, string>;
     if (gadgetInfos.length == 0) {
-      systemPromptWorkspace =
-          "This workspace does not contain any gadgets yet. You can use connected resources " +
-          "and executeCode without one. Use `createGadget` tool only when the task calls for a new " +
-          "application or saved output, before writing that gadget's files.";
+      workspaceSections = {
+        workspace:
+            "This workspace does not contain any gadgets yet. You can use connected resources " +
+            "and executeCode without one. Use `createGadget` tool only when the task calls for a " +
+            "new application or saved output, before writing that gadget's files.",
+      };
     } else {
-      let sections: string[] = [];
+      workspaceSections = {workspace: "# This workspace's gadgets"};
       for (let info of gadgetInfos) {
         // The file list follows the same pinned/unpinned split as readFile: an unpinned gadget
         // with committed code lists its head commit's files (the head fixed for this turn);
@@ -2767,9 +2895,12 @@ async function runAgentPass(
                     : ` — (no binding for this in your env)`);
           }));
         }
-        sections.push(lines.join("\n"));
+        // Named the way its heading names the gadget, so a notice that it changed or was removed
+        // says which one. Unbound gadgets can share a title; the id keeps their sections apart.
+        let section = `gadget ${envName ?? JSON.stringify(info.title)}`;
+        if (workspaceSections[section] !== undefined) section += ` ${info.id}`;
+        workspaceSections[section] = lines.join("\n");
       }
-      systemPromptWorkspace = `# This workspace's gadgets\n\n${sections.join("\n\n")}`;
     }
 
     // Named in the prompt because the request that should trigger them ("make me a doc") may
@@ -2779,12 +2910,10 @@ async function runAgentPass(
     // Build connectable-vendors section. We only list vendor names here; the agent fetches a
     // vendor's resource URL patterns on demand via listConnectableResources.
     let connectableVendors = await hooks.listConnectableVendors();
-    let systemPromptConnections: string;
-    if (connectableVendors.length == 0) {
-      systemPromptConnections = "";
-    } else {
-      systemPromptConnections =
-          `\n\nIf you need access to an external resource that isn't already a binding, you can ask ` +
+    let connections: Record<string, string> = {};
+    if (connectableVendors.length > 0) {
+      connections.connections =
+          `If you need access to an external resource that isn't already a binding, you can ask ` +
           `the user to connect one with the requestConnection tool (pre-configure it as much as you ` +
           `can; use listConnectableResources to learn a vendor's resource URL patterns first). The ` +
           `user accepts or denies in the chat. If they accept, you'll be resumed and the resource ` +
@@ -2796,21 +2925,41 @@ async function runAgentPass(
           `${connectableVendors.map(v => `* ${v.id}: ${v.displayName}`).join("\n")}`;
     }
 
-    // Split the system prompt into static and dynamic parts for better caching.
-    systemPromptSlots = [
-      SYSTEM_PROMPT,
-      (standardFormats ? `${standardFormats}\n\n` : "") +
-          `${systemPromptWorkspace}${systemPromptConnections}` +
-          (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
-    ];
+    staticPrompt = SYSTEM_PROMPT;
+    currentSections = {
+      ...(standardFormats ? {formats: standardFormats} : {}),
+      ...workspaceSections,
+      ...connections,
+    };
+  }
+  if (alwaysAvailableResourcesPrompt) {
+    currentSections.resources = alwaysAvailableResourcesPrompt;
   }
 
   // Shared guidance precedes deployment instructions for both agent types.
-  systemPromptSlots[0] += `\n\n${COMMUNICATION_GUIDANCE}`;
+  staticPrompt += `\n\n${COMMUNICATION_GUIDANCE}`;
   if (instanceInstructions) {
-    systemPromptSlots[0] += `\n\n${instanceInstructions}`;
+    staticPrompt += `\n\n${instanceInstructions}`;
   }
-  let systemPrompt = `${systemPromptSlots[0]}\n\n${systemPromptSlots[1]}`;
+
+  // A chat's first pass records the sections it starts with. Later passes announce what changed
+  // since at the end of the conversation -- unless it ends with a finished response, in which case
+  // there is nothing to prompt (see the check before the model is called) and the next pass will.
+  if (!hasSectionSnapshot) {
+    hooks.recordChatPromptSections(chatId, currentSections);
+    leadingSections = currentSections;
+  } else {
+    let change = diffPromptSections(announcedSections, currentSections);
+    let afterSequence = chatMessages.at(-1)?.sequence;
+    if (change && afterSequence !== undefined && modelMessages.at(-1)?.role !== "assistant") {
+      hooks.recordChatPromptSections(chatId, change, afterSequence);
+      modelMessages.push(promptSectionsUpdateMessage(handle.model, change));
+      modelMessageSources.push({sequence: afterSequence, canCut: false, promptUpdate: true});
+    }
+  }
+  let leadingSystemMessage: SystemMessage = {
+    role: "system", content: staticPrompt, sections: leadingSections, timestamp: 0,
+  };
 
   // Some models charge their response to the same window as the prompt, so the reservation is both
   // withheld from the prompt's budget and sent as the response cap -- the two can't disagree.
@@ -2822,14 +2971,16 @@ async function runAgentPass(
   let lastMeasuredSequence = chatMessages.findLast(message =>
     message.type === "message" && message.author.type === "agent")?.sequence;
   // `measuredTokens` covers the prompt and response of the last model step, so estimate only what
-  // was added after it. A tool result carries the call's sequence but wasn't in that usage.
+  // was added after it. A tool result carries the call's sequence but wasn't in that usage, and
+  // neither was a section update recorded after that step.
   // (The system prompt is not part of the projection, so the pure estimate adds it separately.)
   let contextTokens = measuredTokens > 0 && lastMeasuredSequence !== undefined
     ? measuredTokens + estimateProjectionTokens(
-        projection.filter(({message, sequence}) => sequence !== undefined &&
-          (sequence > lastMeasuredSequence ||
-           (sequence === lastMeasuredSequence && message.role === "toolResult"))))
-    : estimateProjectionTokens(projection) + Math.ceil(systemPrompt.length / 4);
+        projection.filter(({message, sequence, promptUpdate}) => sequence !== undefined &&
+          (sequence > lastMeasuredSequence || (sequence === lastMeasuredSequence &&
+            (message.role === "toolResult" || promptUpdate === true)))))
+    : estimateProjectionTokens(projection) +
+        Math.ceil(getSystemMessageText(leadingSystemMessage).length / 4);
 
   let compactionTurn = isCompactionTurn(chatMessages);
   if (compactionTurn || shouldCompactChat(contextTokens, inputBudget)) {
@@ -3857,10 +4008,9 @@ async function runAgentPass(
   }
 
   let context: AgentContext = {
-    messages: [{
-      role: "system", content: systemPrompt, toolsAdded: toolList.map(toToolDeclaration),
-      timestamp: 0,
-    }, ...modelMessages],
+    messages: [
+      {...leadingSystemMessage, toolsAdded: toolList.map(toToolDeclaration)}, ...modelMessages,
+    ],
     tools: toolList,
   };
 

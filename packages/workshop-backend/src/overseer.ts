@@ -29,7 +29,7 @@ import {
   getAiGatewayLogCost,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, CHAT_CHANGE_MESSAGE_BUDGET, ChatBindingEntry, SeedBindingInfo, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type CompactionCheckpoint, type StoredAssistantMessage, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
+import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, CHAT_CHANGE_MESSAGE_BUDGET, ChatBindingEntry, SeedBindingInfo, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type AiChatPromptSections, type ChatHistory, type CompactionCheckpoint, type StoredAssistantMessage, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
 import { GitImpl } from "./git-binding";
 import { scanWorkpieceForGrep, type GrepScan } from "./grep";
@@ -249,6 +249,11 @@ function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: st
 // Storage key of a chat's compaction checkpoint. See the `chatCompactions` collection.
 function compactionKey(chatId: number, compactedTo: number): string {
   return `${keyString(chatId)}.${keyString(compactedTo)}`;
+}
+
+// Storage key of a chat's prompt section entry. See the `chatPromptSections` collection.
+function promptSectionsKey(chatId: number, afterSequence: number | undefined): string {
+  return `${keyString(chatId)}.${afterSequence === undefined ? "" : keyString(afterSequence)}`;
 }
 
 // A gatekeeper (connection) workpiece. IDs are allocated from the shared workpiece counter (see
@@ -1298,6 +1303,13 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // and deleting the chat remove any.
       chatCompactions: collection<CompactionCheckpoint>()({
         primaryKey: (checkpoint) => compactionKey(checkpoint.chatId, checkpoint.compactedTo),
+      }),
+
+      // Each chat's record of its system prompt sections (see AiChatPromptSections), keyed by
+      // `chatId.afterSequence` so a chat's entries list in conversation order, after the snapshot
+      // (whose key ends at the dot).
+      chatPromptSections: collection<AiChatPromptSections>()({
+        primaryKey: (entry) => promptSectionsKey(entry.chatId, entry.afterSequence),
       }),
 
       // Tracks in-progress agent turns so they can be resumed after a server restart. See
@@ -7141,6 +7153,22 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  // AgentHooks implementation: the chat's prompt section entries, the snapshot first.
+  listChatPromptSections(chatId: number): AiChatPromptSections[] {
+    return Array.from(this.storage.chatPromptSections.list({prefix: `${keyString(chatId)}.`}));
+  }
+
+  // AgentHooks implementation. Like commitChatCompaction, drops the change of a chat deleted while
+  // its pass was running.
+  recordChatPromptSections(
+      chatId: number, sections: Record<string, string | null>, afterSequence?: number): void {
+    if (!this.storage.chatMeta.get(chatId)) return;
+    let entry = this.storage.chatPromptSections.get(promptSectionsKey(chatId, afterSequence))
+        ?? {chatId, afterSequence, changes: []};
+    entry.changes.push(sections);
+    this.storage.chatPromptSections.put(entry);
+  }
+
   // Points the chat at the newest checkpoint a revert leaves intact. A revert erases Yjs history from
   // `revertFrom` onward, so any checkpoint that folded in those changes can never be replayed again
   // and is deleted; earlier ones stay, which is what lets a revert cross a boundary at all.
@@ -11931,6 +11959,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.impl.storage.chatCompactions.list({prefix: `${keyString(chatId)}.`}),
         checkpoint => compactionKey(chatId, checkpoint.compactedTo));
     for (let key of checkpoints) this.impl.storage.chatCompactions.delete(key);
+    for (let entry of this.impl.listChatPromptSections(chatId)) {
+      this.impl.storage.chatPromptSections.delete(promptSectionsKey(chatId, entry.afterSequence));
+    }
 
     // The chat's change stream: rows (retired included), the straggler-bridge boundary, and the
     // per-client dedupe records (which live exactly as long as the chat -- see submitCodeChange).
