@@ -82,13 +82,23 @@ export class AiGatewayConfig {
   }
 
   /**
-   * Get the list of models available through AI Gateway, as AiChatAuthorInfo entries.
+   * Whether pickers offer a model: a suggested model the catalog lists for an enabled provider
+   * and doesn't hide. Only offering is decided here: a model not offered still resolves (see
+   * resolveModel), so stored references to a hidden model keep working.
+   */
+  isModelOffered(provider: string, modelId: string): boolean {
+    let model = SUGGESTED_MODELS[provider as AiModelConfig["provider"]]?.[modelId];
+    return this.providers.has(provider) && model !== undefined && model.hidden !== true;
+  }
+
+  /**
+   * Get the list of models offered through AI Gateway, as AiChatAuthorInfo entries.
    */
   getModelList(): AiChatAuthorInfo[] {
     let result: AiChatAuthorInfo[] = [];
     for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
-      if (this.providers.has(provider)) {
-        for (let [id, model] of Object.entries(models)) {
+      for (let [id, model] of Object.entries(models)) {
+        if (this.isModelOffered(provider, id)) {
           result.push({ type: "agent", id, name: model.name });
         }
       }

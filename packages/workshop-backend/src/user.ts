@@ -659,19 +659,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async listModels(): Promise<AiChatAuthorInfo[]> {
     let result: AiChatAuthorInfo[] = [];
 
-    // When AI Gateway mode is active, include all suggested models for enabled providers.
+    // When AI Gateway mode is active, include the suggested models offered on enabled providers.
     let gwConfig = getAiGatewayConfig(this.env);
-    let gwModelIds = new Set<string>();
     if (gwConfig) {
-      for (let entry of gwConfig.getModelList()) {
-        result.push(entry);
-        gwModelIds.add(entry.id);
-      }
+      result.push(...gwConfig.getModelList());
     }
 
-    // Also include user-configured models, skipping any that duplicate a gateway model.
+    // Also include user-configured models, skipping any that a gateway model shadows, including
+    // a hidden one (see getChatContext()).
     for (let model of this.storage.aiModels.list()) {
-      if (!gwModelIds.has(model.profile.id)) {
+      if (!gwConfig?.resolveModel(model.profile.id)) {
         result.push(model.profile);
       }
     }
@@ -899,13 +896,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async getExternalMessageChatContext(existingChatModelId: string | null): Promise<UserChatContext> {
+    // An existing chat keeps its model while it still resolves, even once no longer offered. A new
+    // conversation takes the user's preferred model only while it is still offered, as the web
+    // composer does with its stored choice, and otherwise the first available model.
+    let gwConfig = getAiGatewayConfig(this.env);
     let models = await this.listModels();
-    // Prefer the existing chat's model, then the user's preferred model, then the first available model.
-    let selectedModel = models.find(model => model.id === existingChatModelId)
-      ?? models.find(model => model.id === this.storage.preferredModel.get())
-      ?? models[0];
+    let preferredModel = this.storage.preferredModel.get();
+    let chatModelResolves = existingChatModelId !== null &&
+        !!(gwConfig?.resolveModel(existingChatModelId) ??
+           this.storage.aiModels.get(existingChatModelId));
+    let selectedModelId = chatModelResolves
+      ? existingChatModelId
+      : (models.find(model => model.id === preferredModel) ?? models[0])?.id ?? null;
 
-    return this.getChatContext(selectedModel?.id ?? null);
+    return this.getChatContext(selectedModelId);
   }
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
