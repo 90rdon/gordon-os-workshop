@@ -2411,19 +2411,20 @@ export function computeChatEpochChanges(
   };
 }
 
-function inferSelectedModelFromMessages(messages: AiChatMessage[]): string | null {
+// The agent that last spoke in the chat: the author of the most recent agent message or agent error.
+function inferChatAgentFromMessages(messages: AiChatMessage[]): AiChatAuthorInfo | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
 
     if (msg.type === "error") {
       if (msg.author.type === "agent") {
-        return msg.author.id;
+        return msg.author;
       }
       continue;
     }
 
     if (msg.type === "message") {
-      return msg.author.type === "agent" ? msg.author.id : null;
+      return msg.author.type === "agent" ? msg.author : null;
     }
   }
 
@@ -3250,6 +3251,9 @@ function ChatInterface({
 
   const isAgentActive = !!currentChatMetadata?.activeAgent;
   const activeAgent = currentChatMetadata?.activeAgent;
+  // Names the chat's own model in the composer even when the picker no longer offers it.
+  const chatAgent = activeAgent ?? inferChatAgentFromMessages(currentMessages);
+  const selectedModelName = chatAgent?.id === selectedModel ? chatAgent.name : undefined;
 
   // Notify parent when agent active state changes
   const onAgentActiveChangeRef = useRef(onAgentActiveChange);
@@ -3338,7 +3342,7 @@ function ChatInterface({
         // 2. Otherwise, derive the model from the most recent agent message or agent error.
         setSelectedModel(
           fallbackToStoredModelSelection(
-            inferSelectedModelFromMessages(currentMessages),
+            inferChatAgentFromMessages(currentMessages)?.id ?? null,
             availableModels,
           ),
         );
@@ -6343,6 +6347,7 @@ function ChatInterface({
                     isAgentActive={isAgentActive}
                     models={availableModels}
                     selectedModel={selectedModel}
+                    selectedModelName={selectedModelName}
                     onModelChange={handleModelChange}
                     pendingConsoleLogCount={pendingConsoleLogCount}
                     consoleLogPreview={consoleLogPreview}

@@ -84,6 +84,7 @@ export const ChatComposer = ({
   isAgentActive,
   models,
   selectedModel,
+  selectedModelName,
   onModelChange,
   pendingConsoleLogCount = 0,
   consoleLogPreview = "",
@@ -123,6 +124,8 @@ export const ChatComposer = ({
   isAgentActive: boolean;
   models: AiChatAuthorInfo[];
   selectedModel: string | null;
+  /** See ComposerModelSelector's prop of the same name. */
+  selectedModelName?: string;
   onModelChange: (modelId: string | null) => void;
   pendingConsoleLogCount?: number;
   consoleLogPreview?: string;
@@ -955,6 +958,7 @@ export const ChatComposer = ({
               <ComposerModelSelector
                 models={models}
                 selectedModel={selectedModel}
+                selectedModelName={selectedModelName}
                 onModelChange={onModelChange}
               />
               {isAgentActive && onStop ? (

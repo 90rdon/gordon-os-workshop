@@ -5,17 +5,24 @@ import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 type ComposerModelSelectorProps = {
   models: readonly AiChatAuthorInfo[];
   selectedModel: string | null;
+  /**
+   * Shown for `selectedModel` when `models` doesn't offer it, such as a hidden model an existing
+   * chat last ran on. The raw model id is shown when this is absent too.
+   */
+  selectedModelName?: string;
   onModelChange: (modelId: string | null) => void;
 };
 
 export const ComposerModelSelector = ({
   models,
   selectedModel,
+  selectedModelName,
   onModelChange,
 }: ComposerModelSelectorProps) => {
   const selectedModelLabel = selectedModel == null
     ? "No agent"
-    : models.find((model) => model.id === selectedModel)?.name ?? selectedModel;
+    : models.find((model) => model.id === selectedModel)?.name ??
+      selectedModelName ?? selectedModel;
 
   return (
     <DropdownMenu>
