@@ -22,7 +22,7 @@ import {
   Hexagon,
 } from '@phosphor-icons/react'
 import AddModelModal from './AddModelModal'
-import { persistSelectedModel } from './modelSelection'
+import { LATEST_MODELS_HEADING, partitionLatestModels, persistSelectedModel } from './modelSelection'
 import { logoComponents } from './components/ConnectionLogos'
 import { getVendorIconBackground } from './components/vendorColors'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
@@ -313,6 +313,50 @@ export default function OnboardingWizard({
 
   // ── render ────────────────────────────────────────────────────────────────────
 
+  const { latest, fixed } = partitionLatestModels(models)
+  const renderModelOption = (model: AiChatAuthorInfo) => (
+    <button
+      key={model.id}
+      onClick={() => setSelectedModelId(model.id)}
+      className={`
+        w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left
+        transition-all duration-150
+        ${selectedModelId === model.id
+          ? 'border-kumo-brand bg-kumo-brand/5 ring-1 ring-kumo-brand/20'
+          : 'border-kumo-line hover:border-kumo-fill hover:bg-kumo-tint'
+        }
+      `}
+    >
+      <div
+        className={`
+          w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold
+          transition-colors duration-150
+          ${selectedModelId === model.id
+            ? 'bg-kumo-brand text-kumo-inverse'
+            : 'bg-kumo-tint text-kumo-subtle'
+          }
+        `}
+      >
+        {model.name[0]?.toUpperCase()}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-kumo-default truncate">
+          {model.name}
+        </p>
+        <p className="text-xs text-kumo-subtle truncate">
+          {model.id}
+        </p>
+      </div>
+      {selectedModelId === model.id && (
+        <Check
+          size={18}
+          weight="bold"
+          className="text-kumo-brand flex-shrink-0"
+        />
+      )}
+    </button>
+  )
+
   return (
     <>
     {/* visual-viewport-fixed already insets by the safe areas, so plain padding suffices. */}
@@ -490,48 +534,16 @@ export default function OnboardingWizard({
                 ) : (
                   <>
                     <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                      {models.map((model) => (
-                        <button
-                          key={model.id}
-                          onClick={() => setSelectedModelId(model.id)}
-                          className={`
-                            w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left
-                            transition-all duration-150
-                            ${selectedModelId === model.id
-                              ? 'border-kumo-brand bg-kumo-brand/5 ring-1 ring-kumo-brand/20'
-                              : 'border-kumo-line hover:border-kumo-fill hover:bg-kumo-tint'
-                            }
-                          `}
-                        >
-                          <div
-                            className={`
-                              w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold
-                              transition-colors duration-150
-                              ${selectedModelId === model.id
-                                ? 'bg-kumo-brand text-kumo-inverse'
-                                : 'bg-kumo-tint text-kumo-subtle'
-                              }
-                            `}
-                          >
-                            {model.name[0]?.toUpperCase()}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium text-kumo-default truncate">
-                              {model.name}
-                            </p>
-                            <p className="text-xs text-kumo-subtle truncate">
-                              {model.id}
-                            </p>
-                          </div>
-                          {selectedModelId === model.id && (
-                            <Check
-                              size={18}
-                              weight="bold"
-                              className="text-kumo-brand flex-shrink-0"
-                            />
-                          )}
-                        </button>
-                      ))}
+                      {latest.length > 0 && (
+                        <p className="px-1 text-xs font-medium text-kumo-inactive">
+                          {LATEST_MODELS_HEADING}
+                        </p>
+                      )}
+                      {latest.map(renderModelOption)}
+                      {latest.length > 0 && fixed.length > 0 && (
+                        <div className="border-t border-kumo-line" />
+                      )}
+                      {fixed.map(renderModelOption)}
 
                       {models.length === 0 && (
                         <div className="text-center py-8">

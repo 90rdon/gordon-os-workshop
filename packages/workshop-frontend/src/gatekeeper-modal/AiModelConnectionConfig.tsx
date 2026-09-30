@@ -1,6 +1,7 @@
 import { Select, type PortalContainer } from '@cloudflare/kumo'
 import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { ConnectionConfigField } from './ConnectionConfigField'
+import { partitionLatestModels } from '../modelSelection'
 
 export interface AiModelConnectionConfigProps {
   availableModels: AiChatAuthorInfo[]
@@ -30,7 +31,9 @@ export function AiModelConnectionConfig({
           onValueChange={(v) => onSelectedModelIdChange(v as string | undefined)}
           renderValue={(id) => availableModels.find((m) => m.id === id)?.name ?? id}
         >
-          {availableModels.map(model => (
+          {/* A model connection keeps the model it was created with, so a "Latest" alias, which
+              would promise to follow updates, isn't offered. */}
+          {partitionLatestModels(availableModels).fixed.map(model => (
             <Select.Option key={model.id} value={model.id}>
               {model.name}
             </Select.Option>

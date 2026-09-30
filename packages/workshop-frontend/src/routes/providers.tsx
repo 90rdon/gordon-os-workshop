@@ -7,6 +7,7 @@ import {
   AiGatewayInfo,
   AiModelProvider,
   SUGGESTED_MODELS,
+  isLatestModelAlias,
 } from '@gadgets/workshop-shared/api'
 import {
   Plus,
@@ -188,7 +189,8 @@ function ProvidersPage() {
   const isBuiltIn = (modelId: string): boolean => {
     if (!aiConfig?.enabled) return false
     const enabled = new Set((aiConfig as Extract<AiGatewayInfo, { enabled: true }>).enabledProviders)
-    return PROVIDER_ORDER.some((p) => enabled.has(p) && modelId in SUGGESTED_MODELS[p])
+    return isLatestModelAlias(modelId) ||
+      PROVIDER_ORDER.some((p) => enabled.has(p) && modelId in SUGGESTED_MODELS[p])
   }
 
   // Bumped whenever the user opens a dialog, so a configuration that finishes loading after a later

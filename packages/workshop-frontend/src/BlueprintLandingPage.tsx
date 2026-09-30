@@ -10,6 +10,7 @@ import { ArrowsOutSimple, ArrowLeft, ArrowSquareOut, DotsThree, DownloadSimple, 
 import { useAuth } from './useAuth'
 import LoginPage from './LoginPage'
 import { normalizeResourceUrl } from './resourceMatching'
+import { partitionLatestModels } from './modelSelection'
 import {
   BLUEPRINT_ARCHIVE_EXTENSION,
   makeBlueprintFilename,
@@ -1401,7 +1402,8 @@ function BindingField({
           container={selectPortalContainer}
           disabled={models.length === 0}
         >
-          {models.map(m => (
+          {/* As in AiModelConnectionConfig, a model connection can't follow a "Latest" alias. */}
+          {partitionLatestModels(models).fixed.map(m => (
             <Select.Option key={m.id} value={m.id}>
               {m.name}
             </Select.Option>

@@ -1,6 +1,10 @@
 import { Checkbox, Select, type PortalContainer } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, WorkpieceId, validateBindingName } from '@gadgets/workshop-shared/api'
+import {
+  AiChatAuthorInfo, LATEST_MODEL_PREFIX, MODEL_FAMILY_NAMES, ModelFamily, WorkpieceId,
+  isLatestModelAlias, validateBindingName,
+} from '@gadgets/workshop-shared/api'
 import { WorkshopInput } from '../components/WorkshopControls'
+import { LATEST_MODELS_HEADING, partitionLatestModels } from '../modelSelection'
 import { ConnectionConfigField } from './ConnectionConfigField'
 
 /**
@@ -53,6 +57,18 @@ export function spawnerEnvFromRows(rows: SpawnerEnvRow[]): Record<string, Workpi
   return env
 }
 
+const renderModelOption = (model: AiChatAuthorInfo) => (
+  <Select.Option key={model.id} value={model.id}>
+    {model.name}
+  </Select.Option>
+)
+
+// The family a "Latest" alias follows, as named in its help text.
+function latestFamilyName(aliasId: string): string {
+  const family = aliasId.slice(LATEST_MODEL_PREFIX.length)
+  return MODEL_FAMILY_NAMES[family as ModelFamily] ?? family
+}
+
 export interface AgentSpawnerConfigFormProps {
   availableModels: AiChatAuthorInfo[]
   displayName: string
@@ -76,6 +92,7 @@ export function AgentSpawnerConfigForm({
   onEnvChange,
   selectContainer,
 }: AgentSpawnerConfigFormProps) {
+  const { latest, fixed } = partitionLatestModels(availableModels)
   const updateRow = (index: number, updates: Partial<SpawnerEnvRow>) => {
     onEnvChange(env.map((row, i) => (i === index ? { ...row, ...updates } : row)))
   }
@@ -114,14 +131,23 @@ export function AgentSpawnerConfigForm({
           <Select.Option value={null as any}>
             None (no agent)
           </Select.Option>
-          {availableModels.map(model => (
-            <Select.Option key={model.id} value={model.id}>
-              {model.name}
-            </Select.Option>
-          ))}
+          {latest.length > 0 && (
+            <>
+              <Select.Separator />
+              <Select.Group>
+                <Select.GroupLabel>{LATEST_MODELS_HEADING}</Select.GroupLabel>
+                {latest.map(renderModelOption)}
+              </Select.Group>
+              <Select.Separator />
+            </>
+          )}
+          {fixed.map(renderModelOption)}
         </Select>
         <p className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-          Choose "None" to create conversations without an agent.
+          {modelId !== null && isLatestModelAlias(modelId)
+            ? `Uses the newest ${latestFamilyName(modelId)} this deployment offers, and switches ` +
+              'automatically when it adds a newer one.'
+            : 'Choose "None" to create conversations without an agent.'}
         </p>
       </ConnectionConfigField>
 

@@ -1,4 +1,4 @@
-import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
+import { isLatestModelAlias, type AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 
 const LAST_SELECTED_MODEL_KEY = "lastSelectedModel";
 
@@ -35,4 +35,18 @@ export function toModelSelectValue(modelId: string | null): string {
 
 export function fromModelSelectValue(value: string): string | null {
   return value === NO_AGENT_OPTION_VALUE ? null : value;
+}
+
+/** Heading over the "Latest" aliases, which pickers list before the models they follow. */
+export const LATEST_MODELS_HEADING = "Follows updates";
+
+/** Splits a model list into its "Latest" aliases and its concrete models, keeping list order. */
+export function partitionLatestModels(models: readonly AiChatAuthorInfo[]): {
+  latest: AiChatAuthorInfo[];
+  fixed: AiChatAuthorInfo[];
+} {
+  return {
+    latest: models.filter((model) => isLatestModelAlias(model.id)),
+    fixed: models.filter((model) => !isLatestModelAlias(model.id)),
+  };
 }

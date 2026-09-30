@@ -51,4 +51,28 @@ describe("ComposerModelSelector", () => {
   it("falls back to the raw id when no name is known", () => {
     expect(renderTriggerLabel("claude-opus-5")).toBe("claude-opus-5");
   });
+
+  it("lists Latest aliases first, under their own heading", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => root!.render(
+      <ComposerModelSelector
+        models={[
+          ...models,
+          { type: "agent", id: "latest:opus", name: "Latest Opus (Claude Opus 5.5)" },
+        ]}
+        selectedModel="latest:opus"
+        onModelChange={() => {}}
+      />,
+    ));
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Select model"]')!;
+    expect(trigger.textContent).toBe("Latest Opus (Claude Opus 5.5)");
+
+    await act(async () => trigger.click());
+    const menu = document.body.querySelector('[role="menu"]')!;
+    const items = [...menu.querySelectorAll('[role="menuitem"]')].map(item => item.textContent);
+    expect(items).toEqual(["Latest Opus (Claude Opus 5.5)", "Claude Opus 5.5", "No agent"]);
+    expect(menu.textContent).toContain("Follows updates");
+  });
 });
