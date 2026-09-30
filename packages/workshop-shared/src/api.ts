@@ -1360,9 +1360,35 @@ export type RedactedAiModelConfig = Omit<AiModelConfig, "apiToken" | "extraHeade
  */
 export const WORKERS_AI_OUTPUT_LIMIT = 32768;
 
+/**
+ * Display names of the model families that "Latest" aliases follow, by family id. An alias
+ * resolves to the first model of its family, in SUGGESTED_MODELS order, that the deployment
+ * offers; listings put this table's order on the aliases.
+ */
+export const MODEL_FAMILY_NAMES = {
+  opus: "Opus", sonnet: "Sonnet", haiku: "Haiku", sol: "Sol", luna: "Luna",
+} as const;
+
+/** A family id from MODEL_FAMILY_NAMES. */
+export type ModelFamily = keyof typeof MODEL_FAMILY_NAMES;
+
+/**
+ * Prefix of a model id that names a family's latest offered model rather than a model, e.g.
+ * `latest:opus`. Provider model ids never contain it.
+ */
+export const LATEST_MODEL_PREFIX = "latest:";
+
+/** Whether a model id is a "Latest" alias (see LATEST_MODEL_PREFIX). */
+export function isLatestModelAlias(modelId: string): boolean {
+  return modelId.startsWith(LATEST_MODEL_PREFIX);
+}
+
 /** One entry of SUGGESTED_MODELS. */
 type SuggestedModel = {
   name: string;
+
+  /** The family whose "Latest" alias may resolve to this model (see MODEL_FAMILY_NAMES). */
+  family?: ModelFamily;
 
   /** The maximum tokens one request may total. */
   contextWindow: number;
@@ -1404,12 +1430,16 @@ const SUGGESTED_MODEL_CATALOG = {
     },
   },
   "anthropic": {
-    "claude-opus-5-5": {name: "Claude Opus 5.5", contextWindow: 1000000},
-    "claude-sonnet-5-5": {name: "Claude Sonnet 5.5", contextWindow: 1000000},
+    "claude-opus-5-5": {name: "Claude Opus 5.5", family: "opus", contextWindow: 1000000},
+    "claude-sonnet-5-5": {name: "Claude Sonnet 5.5", family: "sonnet", contextWindow: 1000000},
     "claude-fable-5-1": {name: "Claude Fable 5.1", contextWindow: 1000000},
-    "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000, hidden: true},
-    "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000, hidden: true},
-    "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
+    "claude-opus-5": {
+      name: "Claude Opus 5", family: "opus", contextWindow: 1000000, hidden: true,
+    },
+    "claude-sonnet-5": {
+      name: "Claude Sonnet 5", family: "sonnet", contextWindow: 1000000, hidden: true,
+    },
+    "claude-haiku-4-5": {name: "Claude Haiku 4.5", family: "haiku", contextWindow: 200000},
   },
   "openai": {
     // pi's GPT-6 catalog reports a 272K window, but these models support 1.05M. Use 272K as the
@@ -1417,15 +1447,18 @@ const SUGGESTED_MODEL_CATALOG = {
     "gpt-6.1-sol": {
       name: "GPT-6.1 Sol", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      family: "sol",
     },
     "gpt-6-sol": {
       name: "GPT-6 Sol", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      family: "sol",
       hidden: true,
     },
     "gpt-6-luna": {
       name: "GPT-6 Luna", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      family: "luna",
     },
     "gpt-6-astra": {
       name: "GPT-6 Astra", contextWindow: 1050000, outputLimit: 128000,
@@ -1434,11 +1467,13 @@ const SUGGESTED_MODEL_CATALOG = {
     "gpt-5.6-sol": {
       name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      family: "sol",
       hidden: true,
     },
     "gpt-5.6-luna": {
       name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      family: "luna",
       hidden: true,
     },
     "gpt-5.6-terra": {

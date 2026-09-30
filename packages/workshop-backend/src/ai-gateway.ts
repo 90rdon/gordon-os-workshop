@@ -1,5 +1,6 @@
 import {
-  AiChatAuthorInfo, AiModelConfig, HTTPS_ONLY_PROVIDERS, SUGGESTED_MODELS,
+  AiChatAuthorInfo, AiModelConfig, HTTPS_ONLY_PROVIDERS, LATEST_MODEL_PREFIX, MODEL_FAMILY_NAMES,
+  SUGGESTED_MODELS, isLatestModelAlias,
 } from "@gadgets/workshop-shared/api";
 import { UserAiModelRecord } from "./user.js";
 
@@ -92,7 +93,9 @@ export class AiGatewayConfig {
   }
 
   /**
-   * Get the list of models offered through AI Gateway, as AiChatAuthorInfo entries.
+   * Get the list of models offered through AI Gateway, as AiChatAuthorInfo entries. Each family
+   * with an offered model is followed by a "Latest" alias, listed after the models so that the
+   * first entry, which pickers default to, stays a concrete model.
    */
   getModelList(): AiChatAuthorInfo[] {
     let result: AiChatAuthorInfo[] = [];
@@ -103,14 +106,37 @@ export class AiGatewayConfig {
         }
       }
     }
+    for (let [family, familyName] of Object.entries(MODEL_FAMILY_NAMES)) {
+      let aliasId = LATEST_MODEL_PREFIX + family;
+      let target = this.resolveModel(aliasId);
+      if (target) {
+        // Names the current target, so the picker says what this deployment runs today.
+        result.push({ type: "agent", id: aliasId,
+                      name: `Latest ${familyName} (${target.profile.name})` });
+      }
+    }
     return result;
   }
 
   /**
    * Look up an AI Gateway model by ID. Returns a UserAiModelRecord if the model is a
-   * SUGGESTED_MODEL for an enabled gateway provider, or undefined otherwise.
+   * SUGGESTED_MODEL for an enabled gateway provider, or undefined otherwise. A "Latest" alias
+   * (see LATEST_MODEL_PREFIX) resolves to the record of the first offered model of its family,
+   * so the profile names the model that actually runs, and a family with none resolves to
+   * undefined.
    */
   resolveModel(modelId: string): UserAiModelRecord | undefined {
+    if (isLatestModelAlias(modelId)) {
+      let family = modelId.slice(LATEST_MODEL_PREFIX.length);
+      for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
+        for (let [id, model] of Object.entries(models)) {
+          if (model.family === family && this.isModelOffered(provider, id)) {
+            return this.resolveModel(id);
+          }
+        }
+      }
+      return undefined;
+    }
     for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
       if (this.providers.has(provider) && modelId in models) {
         return {

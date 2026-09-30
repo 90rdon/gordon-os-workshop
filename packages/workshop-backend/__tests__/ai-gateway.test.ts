@@ -152,6 +152,49 @@ describe("AiGatewayConfig model offering", () => {
   });
 });
 
+describe("AiGatewayConfig Latest aliases", () => {
+  const gatewayEnv = (providers: string) => env({
+    CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
+    CF_AI_GATEWAY_API_TOKEN: "gateway-token",
+    CF_AI_GATEWAY_PROVIDERS: providers,
+  });
+
+  it("resolves to the newest offered model of the family, skipping hidden ones", () => {
+    const config = new AiGatewayConfig(gatewayEnv("anthropic,openai"));
+    // gpt-6-sol is hidden, and gpt-6.1-sol is ahead of it anyway; claude-opus-5 is hidden.
+    expect(config.resolveModel("latest:sol")?.profile)
+        .toEqual({ type: "agent", id: "gpt-6.1-sol", name: "GPT-6.1 Sol" });
+    expect(config.resolveModel("latest:opus")?.config)
+        .toMatchObject({ provider: "anthropic", model: "claude-opus-5-5" });
+    expect(config.resolveModel("latest:nonexistent")).toBeUndefined();
+  });
+
+  it("lists each alias after the models, named after its current target", () => {
+    const list = new AiGatewayConfig(gatewayEnv("anthropic,openai")).getModelList();
+    expect(list[0].id).not.toMatch(/^latest:/);
+    expect(list.filter(model => model.id.startsWith("latest:"))).toEqual([
+      { type: "agent", id: "latest:opus", name: "Latest Opus (Claude Opus 5.5)" },
+      { type: "agent", id: "latest:sonnet", name: "Latest Sonnet (Claude Sonnet 5.5)" },
+      { type: "agent", id: "latest:haiku", name: "Latest Haiku (Claude Haiku 4.5)" },
+      { type: "agent", id: "latest:sol", name: "Latest Sol (GPT-6.1 Sol)" },
+      { type: "agent", id: "latest:luna", name: "Latest Luna (GPT-6 Luna)" },
+    ]);
+  });
+
+  it("omits and doesn't resolve an alias whose family has no enabled provider", () => {
+    const config = new AiGatewayConfig(gatewayEnv("openai"));
+    expect(config.getModelList().map(model => model.id)).not.toContain("latest:opus");
+    expect(config.resolveModel("latest:opus")).toBeUndefined();
+  });
+
+  it("gets a model through an alias", () => {
+    const aliasEnv = gatewayEnv("anthropic,openai");
+    const record = new AiGatewayConfig(aliasEnv).resolveModel("latest:sol")!;
+    const handle = getModel(aliasEnv, record.config, { type: "user", id: "user-1", name: "User" });
+    expect(handle.model.id).toBe("gpt-6.1-sol");
+  });
+});
+
 describe("getAiGatewayLogCost", () => {
   afterEach(() => vi.unstubAllGlobals());
 
