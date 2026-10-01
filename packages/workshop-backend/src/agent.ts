@@ -403,7 +403,7 @@ export type StoredToolCall = Omit<ToolCall, "arguments">;
  * snapshot is subtractive on purpose -- copy everything, delete only what's provably redundant --
  * so fields pi adds in the future are retained by default (dropping them would silently reduce
  * fidelity and break prompt caching). Stored server-side only (see `chatModelData` in
- * overseer.ts); clients never receive these.
+ * overseer-storage.ts); clients never receive these.
  */
 export type StoredAssistantMessage = Omit<AssistantMessage, "content"> & {
   content: (TextContent | ThinkingContent | StoredToolCall)[];
@@ -498,7 +498,7 @@ export interface AgentHooks {
   getGadgetHead(gadgetId: WorkpieceId): string | undefined;
 
   /**
-   * A worktree's accepted commit (WorktreeRecord.pinBase in overseer.ts): what an unpinned
+   * A worktree's accepted commit (WorktreeRecord.pinBase in overseer-storage.ts): what an unpinned
    * worktree reads at, lazily by path, and what its first modification pins it at -- the
    * worktree analog of getGadgetHead. Only an accept moves it, and none can run mid-turn.
    * Undefined for anything that is not a live worktree.
@@ -531,10 +531,11 @@ export interface AgentHooks {
   /**
    * Create a new, empty gadget workpiece with the given title and binding name, provisional to
    * the given chat: it becomes permanent only when the user accepts the chat's changes through
-   * the "changes" message that records the creation (see GadgetRecord.pending in overseer.ts).
-   * Throws if the binding name is invalid or already claimed by another gadget (including one
-   * still pending in another chat). Returns the id and the (trimmed) title as created. `output`
-   * is the format declared by the blueprint being instantiated, if any (see fetchBlueprint).
+   * the "changes" message that records the creation (see GadgetRecord.pending in
+   * overseer-storage.ts). Throws if the binding name is invalid or already claimed by another
+   * gadget (including one still pending in another chat). Returns the id and the (trimmed) title
+   * as created. `output` is the format declared by the blueprint being instantiated, if any (see
+   * fetchBlueprint).
    */
   createGadget(title: string, bindingName: string, chatId: number, output?: BlueprintOutput)
       : {id: WorkpieceId, title: string};
@@ -1377,7 +1378,7 @@ async function runAgentPass(
 
   // Worktrees created this step (see the createWorktree tool), awaiting the same barrier: its
   // "changes" message records each creation (`createdWorktrees`) and makes the pending record
-  // permanent (see WorktreeRecord.pending in overseer.ts).
+  // permanent (see WorktreeRecord.pending in overseer-storage.ts).
   let pendingCreatedWorktrees: {worktreeId: WorkpieceId, title: string, bindingName: string}[] =
       [];
 

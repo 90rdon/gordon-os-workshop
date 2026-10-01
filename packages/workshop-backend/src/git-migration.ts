@@ -66,7 +66,7 @@ import type {
 } from "@gadgets/workshop-shared/api";
 import { diffFiles, type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import type { CompactionCheckpoint } from "./agent";
-import type { GadgetRecord, OverseerStorage } from "./overseer";
+import type { GadgetRecord, OverseerStorage } from "./overseer-storage";
 import { chatChangeStatuses, legacyChatBaseVersion } from "./agent-compaction";
 import { GitStore, filesEqual } from "./git-store";
 import { createWorkshopLogger } from "./observability";
