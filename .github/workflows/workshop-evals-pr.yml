@@ -23,7 +23,7 @@ on:
       - packages/workshop-backend/src/ai-*
       - packages/workshop-backend/src/admin-config.ts
       # Tool implementations and the workspace the agent operates on
-      - packages/workshop-backend/src/overseer.ts
+      - packages/workshop-backend/src/overseer*
       - packages/workshop-backend/src/worktree-*
       - packages/workshop-backend/src/web-fetch.ts
       # Output formats the prompt steers toward
@@ -41,7 +41,7 @@ on:
       - packages/workshop-backend/src/agent*
       - packages/workshop-backend/src/ai-*
       - packages/workshop-backend/src/admin-config.ts
-      - packages/workshop-backend/src/overseer.ts
+      - packages/workshop-backend/src/overseer*
       - packages/workshop-backend/src/worktree-*
       - packages/workshop-backend/src/web-fetch.ts
       - packages/bundled-blueprints/**
