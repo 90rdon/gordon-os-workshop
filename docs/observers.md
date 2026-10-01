@@ -76,7 +76,7 @@ The check works as follows:
   - **`build`** collaborators (full access — chat + code + all bindings) must be verified
     against **every** gatekeeper the Gadget has.
   - **`use`** collaborators (UI only, no chat access — see `UseOverseerInterface` in
-    `overseer.ts`) must be verified only against gatekeepers their sessions can actually
+    `overseer-client.ts`) must be verified only against gatekeepers their sessions can actually
     reach: those **bound by some gadget** (the UI can invoke them), those with an **enabled
     hook** (a hook is a live write channel into a gadget they can open, delivering the
     connection's data regardless of binding edges), plus — transitively — every **env target of a
@@ -108,7 +108,7 @@ The check works as follows:
 | Role resolution / permission graph | `packages/workshop-backend/src/sharing.ts` (`getEffectiveRole`, `computeEffectiveRoles`) |
 | `containsRestrictedData` enforcement | `overseer.ts` (`authorizeObservation` sets `containsRestrictedData`; `getWebFetchEnv`, `submitAction`) |
 | `ownerInvitesOnly` enforcement | `overseer.ts` (`authorizeObservation` sets `ownerInvitesOnly` and restarts the workspace if anyone lost access); `sharing.ts` (`computeEffectiveRoles` counts only direct owner grants; the `ownerInvitesOnly` hook in `redeemShareKey`, `addCollaborator`, `createShareLink`, `newShareLinkKey`) |
-| Observation recording | `overseer.ts` `authorizeObservation()`; `ApprovalQueueImpl` |
+| Observation recording | `overseer.ts` `authorizeObservation()`; `overseer-client.ts` `ApprovalQueueImpl` |
 | Gatekeeper storage record | `overseer-storage.ts` `GatekeeperRecord` (has `creationSpec.vendorId`) |
 | `GatekeeperCreationSpec` | `packages/workshop-shared/src/api.ts` |
 | Gatekeeper facet access | `overseer.ts` `getGatekeeperFacet()` |

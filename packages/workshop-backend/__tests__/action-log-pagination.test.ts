@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RpcStub } from "capnweb";
 import type { ActionLogEntry, ActionsSubscriber } from "@gadgets/workshop-shared/api";
-import { ACTION_HISTORY_PAGE_DEFAULT_LIMIT, ACTION_REPLAY_PAGE_SIZE } from "../src/overseer.js";
+import { ACTION_HISTORY_PAGE_DEFAULT_LIMIT, ACTION_REPLAY_PAGE_SIZE } from "../src/overseer-client.js";
 import { makeMockStorage } from "./mock-storage.js";
 import {
   FIXTURE_EPOCH, makeActionStorage, makePreIndexActionStorage, openFakeOverseer, putAction,
