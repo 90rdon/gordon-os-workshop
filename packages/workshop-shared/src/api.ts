@@ -1698,15 +1698,54 @@ export type UiBundle = {
 //  url: string;
 
   /**
-   * Returns the raw JS code to execute in the Gadget iframe.
+   * The code of `client.js`, the UI's entry module, with each relative import rewritten to the
+   * internal key the page's import map resolves (see `ui-page.ts`). When a diagnostic is fatal,
+   * this is instead a one-line module that throws the first fatal message.
    * TODO: For now we just return the code but we should switch to serving over HTTP as described
    *   above, for caching. Or... maybe we should actually serve over RPC, but also employ the
    *   Cache API in the browser? Or some other local storage?
    */
   jsCode: string;
 
-  // Other metadata could be placed here in the future, e.g. to specify what version of support
-  // libraries should be loaded.
+  /**
+   * Every other module that `client.js` reaches through its imports, rewritten like `jsCode`.
+   * Anyone who can use the gadget receives these, so nothing only `server.js` imports is ever
+   * included. Never present when a diagnostic is fatal; otherwise absent when there are none.
+   */
+  modules?: UiModule[];
+
+  /** Problems found while collecting the UI's modules. Absent when there are none. */
+  diagnostics?: UiDiagnostic[];
+};
+
+/** One module of a Gadget UI other than its entry, `client.js`. */
+export type UiModule = {
+  /** The module's path in the gadget's file tree, with no `.` or `..` segments. */
+  path: string;
+
+  /** The module's code, with its relative imports rewritten like `UiBundle.jsCode`. */
+  code: string;
+};
+
+/** A problem found in a Gadget UI's imports, reported to the gadget console. */
+export type UiDiagnostic = {
+  /**
+   * `fatal`: the UI can't load at all, so it isn't loaded. `warning`: it loads, but the problem
+   * may surface when the code runs.
+   */
+  severity: "fatal" | "warning";
+
+  /** The file the problem is in. A problem with the UI as a whole is reported on `client.js`. */
+  path: string;
+
+  /** 1-based line of the problem in `path`; 1 for a problem with the UI as a whole. */
+  line: number;
+
+  /** 1-based column of the problem in `path`; 1 for a problem with the UI as a whole. */
+  column: number;
+
+  /** A description naming the file, line, specifier as written, and resolved path. */
+  message: string;
 };
 
 /**
