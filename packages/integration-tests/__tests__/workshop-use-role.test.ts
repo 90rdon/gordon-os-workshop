@@ -275,13 +275,12 @@ it("a use collaborator's UI bundle carries only what client.js reaches", async (
   using useWs = await viewerApi.openGadget(workspaceId);
   using useGadget = await useWs.getGadget(gadgetId);
   expect(await useGadget.getUiBundle()).toEqual({
-    jsCode: `import { list } from "gadget:ui/list.js";\n`,
-    modules: [{ path: "ui/list.js", code: "export const list = [];\n" }],
+    modules: [
+      { path: "client.js", code: `import { list } from "gadget:ui/list.js";\n` },
+      { path: "ui/list.js", code: "export const list = [];\n" },
+    ],
   });
 
   await merge(head, split, { ...split, "client.js": `import { Gadget } from "./server.js";\n` });
-  const bundle = await useGadget.getUiBundle();
-  expect(bundle).toMatchObject({ diagnostics: [{ severity: "fatal", path: "client.js", line: 1 }] });
-  expect(bundle?.modules).toBeUndefined();
-  expect(JSON.stringify(bundle)).not.toMatch(/SERVER-ONLY|LIB-ONLY/);
+  await expect(useGadget.getUiBundle()).rejects.toThrow('client.js:1: "./server.js" resolves to server.js');
 });

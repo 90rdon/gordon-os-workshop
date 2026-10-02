@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { UiBundle } from "@gadgets/workshop-shared/api";
-import { buildUiBundle, MAX_UI_LENGTH } from "../src/ui-bundle";
+import { buildUiBundle } from "../src/ui-bundle";
 
 function bundle(files: Record<string, string>): UiBundle {
   return buildUiBundle(new Map(Object.entries(files)))!;
@@ -30,9 +30,9 @@ describe("buildUiBundle", () => {
       "lib/secret.js": "export let key = 'SECRET';",
       "unused.js": "export let unused = 1;",
     })).toEqual({
-      jsCode: `import { List } from "gadget:ui/list.js";\n` +
-          `let home = () => import("gadget:pages/home.js");`,
       modules: [
+        {path: "client.js", code: `import { List } from "gadget:ui/list.js";\n` +
+            `let home = () => import("gadget:pages/home.js");`},
         {path: "ui/list.js",
           code: `import { fmt } from "gadget:lib/fmt.js";\nexport * from "gadget:client.js";`},
         {path: "pages/home.js", code: "export let page = 1;"},
@@ -46,106 +46,65 @@ describe("buildUiBundle", () => {
       "client.js": `import "./b.js";\nimport "./a/../b.js";`,
       "b.js": "export let state = {};",
     })).toEqual({
-      jsCode: `import "gadget:b.js";\nimport "gadget:b.js";`,
-      modules: [{path: "b.js", code: "export let state = {};"}],
+      modules: [
+        {path: "client.js", code: `import "gadget:b.js";\nimport "gadget:b.js";`},
+        {path: "b.js", code: "export let state = {};"},
+      ],
     });
   });
 
-  it("fails on a static import of a missing file, naming importer, specifier and path", () => {
-    let result = bundle({
+  it("throws on a static import of a missing file, naming importer, line, specifier and path", () => {
+    expect(() => bundle({
       "client.js": `import "./ui/list.js";`,
       "ui/list.js": `export let a = 1;\n\nimport { b } from "./parts/../missing.js";`,
-    });
-    expect(result.modules).toBeUndefined();
-    let [diagnostic] = result.diagnostics!;
-    expect(diagnostic).toMatchObject({severity: "fatal", path: "ui/list.js", line: 3, column: 20});
-    expect(diagnostic!.message).toContain("ui/list.js:3");
-    expect(diagnostic!.message).toContain(`"./parts/../missing.js"`);
-    expect(diagnostic!.message).toContain("ui/missing.js");
-    expect(result.jsCode).toBe(`throw new Error(${JSON.stringify(diagnostic!.message)});`);
+    })).toThrow(/^ui\/list\.js:3: "\.\/parts\/\.\.\/missing\.js" .*ui\/missing\.js/);
   });
 
   it("makes a string-literal import() of a missing file reject with the same message", () => {
-    let result = bundle({"client.js": `button.onclick = () => import("./pages/../gone.js");`});
-    expect(result.diagnostics).toBeUndefined();
-    let message = dynamicImportMessage(result.jsCode);
-    expect(message).toContain("client.js:1");
-    expect(message).toContain(`"./pages/../gone.js"`);
-    expect(message).toContain("gone.js");
+    let {jsCode} = bundle({"client.js": `button.onclick = () => import("./pages/../gone.js");`}) as
+        {jsCode: string};
+    expect(dynamicImportMessage(jsCode))
+        .toMatch(/^client\.js:1: "\.\/pages\/\.\.\/gone\.js" .*gone\.js/);
   });
 
   it("refuses server.js and ships none of it", () => {
-    let result = bundle({
-      "client.js": `import { Gadget } from "./server.js";\nimport("./server.js");`,
-      "server.js": "export class Gadget { secret = 'SECRET'; }",
-    });
-    expect(result.modules).toBeUndefined();
-    expect(result.diagnostics).toMatchObject([{severity: "fatal", path: "client.js", line: 1}]);
-    expect(result.diagnostics![0]!.message).toContain("server.js");
-    expect(JSON.stringify(result)).not.toContain("SECRET");
+    let server = "export class Gadget { secret = 'SECRET'; }";
+    expect(() => bundle({"client.js": `import { Gadget } from "./server.js";`, "server.js": server}))
+        .toThrow(/^client\.js:1: .*server\.js/);
+    expect(JSON.stringify(bundle({"client.js": `import("./server.js");`, "server.js": server})))
+        .not.toContain("SECRET");
   });
 
-  it("fails on a bare import, telling the agent the RPC names are globals", () => {
-    let result = bundle({"client.js": `import { RpcTarget } from "capnweb";`});
-    expect(result.diagnostics).toMatchObject([{severity: "fatal", path: "client.js", line: 1}]);
-    let message = result.diagnostics![0]!.message;
-    expect(message).toContain("capnweb");
-    expect(message).toContain("RpcTarget");
-    expect(message).toContain("global");
+  it("throws on a bare import, telling the agent the RPC names are globals", () => {
+    expect(() => bundle({"client.js": `import { RpcTarget } from "capnweb";`}))
+        .toThrow(/^client\.js:1: "capnweb" .*globals/);
   });
 
-  it("fails on an internal gadget: key, even in a dynamic import", () => {
-    let result = bundle({
-      "client.js": `import("gadget:ui/list.js");`,
-      "ui/list.js": "export let a = 1;",
-    });
-    expect(result.modules).toBeUndefined();
-    expect(result.diagnostics).toMatchObject([{severity: "fatal", path: "client.js", line: 1}]);
+  it("throws on an internal gadget: key, even in a dynamic import", () => {
+    expect(() => bundle({"client.js": `import("gadget:ui/list.js");`, "ui/list.js": ""}))
+        .toThrow(/^client\.js:1: "gadget:ui\/list\.js"/);
   });
 
-  it("fails on a path with a quote or a space, static or dynamic", () => {
-    let result = bundle({
-      "client.js": `import "./ui/it's.js";\nimport("./ui/my list.js");`,
-      "ui/it's.js": "export let a = 1;",
-      "ui/my list.js": "export let b = 1;",
-    });
-    expect(result.modules).toBeUndefined();
-    expect(result.diagnostics).toMatchObject([
-      {severity: "fatal", path: "client.js", line: 1},
-      {severity: "fatal", path: "client.js", line: 2},
-    ]);
+  it("throws on a path with a quote or a space, static or dynamic", () => {
+    let files = {"ui/it's.js": "", "ui/my list.js": ""};
+    expect(() => bundle({...files, "client.js": `import "./ui/it's.js";`}))
+        .toThrow(/^client\.js:1: .*quotes/);
+    expect(() => bundle({...files, "client.js": `\nimport("./ui/my list.js");`}))
+        .toThrow(/^client\.js:2: .*whitespace/);
   });
 
-  it("fails when the shipped code is over the total cap, naming the limit and the size", () => {
-    let big = "//" + "x".repeat(MAX_UI_LENGTH);
-    let client = `import "./big.js";`;
-    let result = bundle({"client.js": client, "big.js": big});
-    expect(result.modules).toBeUndefined();
-    expect(result.diagnostics).toMatchObject(
-        [{severity: "fatal", path: "client.js", line: 1, column: 1}]);
-    let message = result.diagnostics![0]!.message;
-    expect(message).toContain(String(MAX_UI_LENGTH));
-    expect(message).toContain(String(big.length + `import "gadget:big.js";`.length));
-  });
-
-  it("warns about a computed import() of a relative path and leaves it alone", () => {
-    let client = "let name = 'home';\nimport(`./pages/${name}.js`);";
-    expect(bundle({"client.js": client, "pages/home.js": ""})).toEqual({
-      jsCode: client,
-      diagnostics: [expect.objectContaining({severity: "warning", path: "client.js", line: 2})],
-    });
-  });
-
-  it("ships a module it can't scan unchanged and unfollowed, with a warning", () => {
+  it("ships a computed import() and a module it can't scan as written", () => {
     let view = `import "./other.js";\nlet v = <div>hi</div>;`;
     expect(bundle({
-      "client.js": `import "./view.js";`,
+      "client.js": "import \"./view.js\";\nimport(`./pages/${name}.js`);",
       "view.js": view,
-      "other.js": "export let a = 1;",
+      "other.js": "",
+      "pages/home.js": "",
     })).toEqual({
-      jsCode: `import "gadget:view.js";`,
-      modules: [{path: "view.js", code: view}],
-      diagnostics: [expect.objectContaining({severity: "warning", path: "view.js", line: 2})],
+      modules: [
+        {path: "client.js", code: "import \"gadget:view.js\";\nimport(`./pages/${name}.js`);"},
+        {path: "view.js", code: view},
+      ],
     });
   });
 });

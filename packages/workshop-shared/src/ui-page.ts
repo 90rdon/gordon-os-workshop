@@ -31,7 +31,8 @@ export type UiPage = {
 export function prepareUiPage(bundle: UiBundle): UiPage {
   let imports: Record<string, string> = {};
   let pathsByUrl = new Map<string, string>();
-  for (let {path, code} of [{path: "client.js", code: bundle.jsCode}, ...bundle.modules ?? []]) {
+  let modules = "modules" in bundle ? bundle.modules : [{path: "client.js", code: bundle.jsCode}];
+  for (let {path, code} of modules) {
     let url = moduleUrl(path, code);
     imports[uiModuleKey(path)] = url;
     pathsByUrl.set(url, path);
