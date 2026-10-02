@@ -3795,21 +3795,19 @@ async function runAgentPass(
     // it can be determined) for the overseer's triage.
     let message = turnFailure.errorMessage ?? "The model request failed.";
     let error = new AgentTurnError(message, httpStatusFromError(message, handle.lastResponse));
-    // A transient failure that streamed nothing can simply run again: the request persisted
-    // nothing, and the client has no partial output to withdraw.
-    if (isRetryableAssistantError(turnFailure) && streamedNothing(turnFailure)) {
+    // A transient failure can simply run again, even if the request already streamed some
+    // output: the request persisted nothing, so the retry starts from the last saved step. What
+    // it streamed was only ever provisional, so tell clients to discard it -- otherwise the
+    // retry's output would be appended to the failed attempt's partial text, reasoning, tool
+    // cards and edit previews.
+    if (isRetryableAssistantError(turnFailure)) {
+      emitStreamEvent({type: "streamReset"});
       return {type: "transientFailure", error};
     }
     throw error;
   }
 
   return {type: reloadForCompaction ? "reloadForCompaction" : "finished"};
-}
-
-/** Whether a failed model request sent the client no text, reasoning or tool call. */
-function streamedNothing(message: AssistantMessage): boolean {
-  return message.content.every(block => block.type === "text" ? block.text === ""
-      : block.type === "thinking" && block.thinking === "");
 }
 
 /**
