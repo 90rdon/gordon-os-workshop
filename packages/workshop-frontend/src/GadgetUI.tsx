@@ -318,35 +318,26 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
         const bundle = await gadget.getUiBundle(chatId)
         if (!isCurrent()) return
         if (bundle) {
-          for (const diagnostic of bundle.diagnostics ?? []) {
-            onConsoleLogRef.current?.({
-              timestamp: new Date(),
-              level: diagnostic.severity === 'fatal' ? 'error' : 'warn',
-              message: [diagnostic.message],
-            })
-          }
-          const fatal = bundle.diagnostics?.find(diagnostic => diagnostic.severity === 'fatal')
-          if (fatal) {
-            setSandboxedHtml(null)
-            setError(fatal.message)
-          } else {
-            const page = prepareUiPage(bundle)
-            pathsByUrlRef.current = page.pathsByUrl
-            setSandboxedHtml(createSandboxedHtml(page))
-          }
+          const page = prepareUiPage(bundle)
+          pathsByUrlRef.current = page.pathsByUrl
+          setSandboxedHtml(createSandboxedHtml(page))
         } else {
           setSandboxedHtml(null)
         }
-        setHasLoaded(true)
-        setIsInvalidated(false)
       } catch (err) {
         if (!isCurrent()) return
         console.error('Failed to load UI bundle:', err)
-        setError('Failed to load UI bundle')
+        // Includes imports that break the rules for UI code, so the agent needs to see it.
+        const message = err instanceof Error ? err.message : 'Failed to load UI bundle'
+        onConsoleLogRef.current?.({ timestamp: new Date(), level: 'error', message: [message] })
+        setError(message)
       } finally {
         if (isCurrent()) setLoading(false)
         clearTimeout(giveUp)
       }
+      // A failed load counts too, so the next code change reloads.
+      setHasLoaded(true)
+      setIsInvalidated(false)
     }
 
     loadUiBundle()

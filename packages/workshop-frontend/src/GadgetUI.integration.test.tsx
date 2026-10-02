@@ -611,7 +611,7 @@ describe('GadgetUI no-UI placeholder reporting', () => {
   })
 })
 
-describe('GadgetUI bundle diagnostics and errors', () => {
+describe('GadgetUI bundle errors and modules', () => {
   let container: HTMLDivElement
   let root: Root
 
@@ -636,42 +636,35 @@ describe('GadgetUI bundle diagnostics and errors', () => {
     return onConsoleLog
   }
 
-  const missingImport = 'client.js:1: "./missing.js" resolves to missing.js, which does not exist'
+  it('shows a failed load in place of the frame, reports it, and reloads on the next code change', async () => {
+    const missingImport = 'client.js:1: "./missing.js" resolves to missing.js, which does not exist'
+    const onConsoleLog = vi.fn<(log: ConsoleLogEvent) => void>()
+    const gadget = fakeGadget('unused', 'document.body.textContent = "v1"')
+    const render = (reloadTrigger: number) => root.render(
+      <GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={reloadTrigger} onConsoleLog={onConsoleLog} />,
+    )
+    await act(async () => render(0))
+    await vi.waitFor(() => expect(loadedCode(container)).toContain('v1'))
 
-  it('shows a fatal diagnostic in place of the frame and reports it to the console', async () => {
-    const onConsoleLog = await renderBundle({
-      jsCode: `throw new Error(${JSON.stringify(missingImport)})`,
-      diagnostics: [{ severity: 'fatal', path: 'client.js', line: 1, column: 8, message: missingImport }],
-    })
-
+    gadget.getUiBundle.mockRejectedValueOnce(new Error(missingImport))
+    await act(async () => render(1))
     await vi.waitFor(() => expect(container.textContent).toContain(missingImport))
     expect(container.querySelector('iframe')).toBeNull()
-    expect(onConsoleLog).toHaveBeenCalledOnce()
     expect(onConsoleLog).toHaveBeenCalledWith(
       expect.objectContaining({ level: 'error', message: [missingImport] }),
     )
-  })
 
-  it('reports a warning and still renders the frame', async () => {
-    const warning = 'client.js:2: import(`./pages/${name}.js`) can\'t be followed'
-    const onConsoleLog = await renderBundle({
-      jsCode: 'document.body.textContent = "warned"',
-      diagnostics: [{ severity: 'warning', path: 'client.js', line: 2, column: 1, message: warning }],
-    })
-
-    await vi.waitFor(() => expect(loadedCode(container)).toContain('warned'))
-    expect(onConsoleLog).toHaveBeenCalledOnce()
-    expect(onConsoleLog).toHaveBeenCalledWith(
-      expect.objectContaining({ level: 'warn', message: [warning] }),
-    )
+    gadget.getUiBundle.mockResolvedValueOnce({ jsCode: 'document.body.textContent = "v2"' })
+    await act(async () => render(2))
+    await vi.waitFor(() => expect(loadedCode(container)).toContain('v2'))
   })
 
   // Browsers other than Chrome may name a module by its data: URL rather than its sourceURL.
   it('names the file of an error reported by data: URL', async () => {
-    const onConsoleLog = await renderBundle({
-      jsCode: 'import "gadget:ui/list.js"',
-      modules: [{ path: 'ui/list.js', code: 'setTimeout(() => {\n  throw new Error("boom")\n})' }],
-    })
+    const onConsoleLog = await renderBundle({ modules: [
+      { path: 'client.js', code: 'import "gadget:ui/list.js"' },
+      { path: 'ui/list.js', code: 'setTimeout(() => {\n  throw new Error("boom")\n})' },
+    ] })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
     const iframe = container.querySelector('iframe')!
 
@@ -692,10 +685,10 @@ describe('GadgetUI bundle diagnostics and errors', () => {
   })
 
   it('loads a module whose path contains </script>', async () => {
-    await renderBundle({
-      jsCode: 'import "gadget:</script>.js"',
-      modules: [{ path: '</script>.js', code: 'document.body.textContent = "escaped"' }],
-    })
+    await renderBundle({ modules: [
+      { path: 'client.js', code: 'import "gadget:</script>.js"' },
+      { path: '</script>.js', code: 'document.body.textContent = "escaped"' },
+    ] })
 
     await vi.waitFor(() => expect(loadedCode(container)).toContain('"escaped"'))
   })
