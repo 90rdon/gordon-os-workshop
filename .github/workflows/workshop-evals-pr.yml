@@ -448,7 +448,7 @@ jobs:
         with:
           oidc_base_url: https://ask-bonk.cloudflare-exponent.workers.dev/auth
           model: "cloudflare-ai-gateway/${{ vars.BONK_MODEL }}"
-          variant: "high"
+          variant: "xhigh"
           forks: "false"
           permissions: any
           token_permissions: NO_PUSH
