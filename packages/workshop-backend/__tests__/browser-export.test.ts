@@ -209,7 +209,7 @@ function render(
   let { gadget, harness } = makeHarness(pdfChunks, closePdf);
   let stream = renderGadgetInBrowser(
     {} as BrowserRun,
-    "export default {}",
+    {jsCode: "export default {}"},
     "Test Gadget",
     gadget as never,
     {
@@ -325,6 +325,20 @@ describe("renderGadgetInBrowser", () => {
     expect(harness.blobRequestContinued()).toBe(true);
   });
 
+  it("admits the inline import map by a nonce unique to each render", async () => {
+    let nonces = [];
+    for (let i = 0; i < 2; i++) {
+      let { stream, harness } = render();
+      await collect(await stream);
+      let cspNonce = harness.exportDocumentCsp()?.match(/script-src [^;]*'nonce-([^']+)'/)?.[1];
+      let importMapTag = harness.exportDocument().match(/<script\b[^>]*\btype="importmap"[^>]*>/)?.[0];
+      expect(cspNonce).toBeTruthy();
+      expect(importMapTag?.match(/\bnonce="([^"]*)"/)?.[1]).toBe(cspNonce);
+      nonces.push(cspNonce);
+    }
+    expect(nonces[0]).not.toBe(nonces[1]);
+  });
+
   it("exports an inert snapshot with locally bundled DOMPurify", async () => {
     let { stream, harness } = render(undefined, true, "text/html");
 
@@ -342,7 +356,7 @@ describe("renderGadgetInBrowser", () => {
 
     let stream = renderGadgetInBrowser(
       {} as BrowserRun,
-      "export default {}",
+      {jsCode: "export default {}"},
       "Test Gadget",
       gadget as never,
       {
@@ -378,7 +392,7 @@ describe("renderGadgetInBrowser", () => {
 
     let stream = renderGadgetInBrowser(
       {} as BrowserRun,
-      "export default {}",
+      {jsCode: "export default {}"},
       "Test Gadget",
       gadget as never,
       {
@@ -431,7 +445,7 @@ describe("renderGadgetInBrowser", () => {
       launch.mockReturnValue(pendingLaunch.promise);
       let result = renderGadgetInBrowser(
         {} as BrowserRun,
-        "export default {}",
+        {jsCode: "export default {}"},
         "Test Gadget",
         { [Symbol.dispose]: () => { gadgetDisposed = true; } } as never,
         {
@@ -464,7 +478,7 @@ describe("renderGadgetInBrowser", () => {
 
     await expect(renderGadgetInBrowser(
       {} as BrowserRun,
-      "export default {}",
+      {jsCode: "export default {}"},
       "Test Gadget",
       { [Symbol.dispose]: () => { gadgetDisposed = true; } } as never,
       {

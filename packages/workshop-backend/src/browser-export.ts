@@ -1,7 +1,8 @@
 import { launch, type Page } from "@cloudflare/puppeteer";
 import { RpcSession, type RpcStub, type RpcTransport } from "capnweb";
 import { createLogger } from "@gadgets/observability/logger";
-import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { GadgetExportFormat, UiBundle } from "@gadgets/workshop-shared/api";
+import { prepareUiPage } from "@gadgets/workshop-shared/ui-page";
 import BROWSER_EXPORT_RUNTIME from "./generated/browser-export-runtime.txt";
 import HTML_SANITIZER_RUNTIME from "./generated/html-sanitizer-runtime.txt";
 import {
@@ -37,10 +38,13 @@ const EXPORT_DOCUMENT_URL = "https://gadget-export.invalid/";
 // TODO: CSP and request interception do not cover WebRTC/STUN. The same gap exists for Gadgets
 // running inside an iframe in the user's browser. We should close the gap in both places. For now,
 // extending the same gap to remotely-rendered gadgets is acceptable.
-const EXPORT_DOCUMENT_CSP = "default-src 'none'; frame-src 'none'; script-src data:; " +
-  "style-src data: 'unsafe-inline'; img-src data: blob:; media-src data: blob:; " +
-  "font-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; " +
-  "connect-src 'none'; sandbox allow-scripts;";
+// Import maps must be inline; a per-render nonce admits the page's map without 'unsafe-inline'.
+function exportDocumentCsp(nonce: string): string {
+  return `default-src 'none'; frame-src 'none'; script-src data: 'nonce-${nonce}'; ` +
+    "style-src data: 'unsafe-inline'; img-src data: blob:; media-src data: blob:; " +
+    "font-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; " +
+    "connect-src 'none'; sandbox allow-scripts;";
+}
 const STATIC_HTML_CSP = "default-src 'none'; frame-src 'none'; script-src 'none'; " +
   "style-src data: 'unsafe-inline'; img-src data:; media-src data:; font-src data:; " +
   "object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none';";
@@ -130,21 +134,18 @@ function scriptUrl(source: string): string {
   return `data:text/javascript;charset=utf-8,${encodeURIComponent(source)}`;
 }
 
-function makeExportHtml(clientCode: string, formatId: string): string {
-  let clientPrefix = String.raw`//# sourceURL=client.js
-const { gadget, RpcStub, RpcTarget } = globalThis.__workshopExportRuntime;
-delete globalThis.__workshopExportRuntime;
-`;
-  let clientUrl = scriptUrl(clientPrefix + clientCode);
+function makeExportHtml(bundle: UiBundle, formatId: string, nonce: string): string {
+  let { entryUrl, importMap } = prepareUiPage(bundle);
   let runtimeUrl = scriptUrl(
       `globalThis.gadgetExportFormatId = ${JSON.stringify(formatId)};\n` +
-      `globalThis.__workshopExportClientUrl = ${JSON.stringify(clientUrl)};\n` +
+      `globalThis.__workshopExportClientUrl = ${JSON.stringify(entryUrl)};\n` +
       BROWSER_EXPORT_RUNTIME);
 
   return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
+  <script type="importmap" nonce="${nonce}">${importMap}</script>
 </head>
 <body>
   <script src="${runtimeUrl}"></script>
@@ -161,7 +162,7 @@ delete globalThis.__workshopExportRuntime;
  */
 export async function renderGadgetInBrowser(
   browserBinding: BrowserRun,
-  clientCode: string,
+  bundle: UiBundle,
   documentTitle: string,
   gadget: RpcStub<any>,
   format: GadgetExportFormat,
@@ -213,11 +214,12 @@ export async function renderGadgetInBrowser(
         let url = request.url();
         if (request.isNavigationRequest()) {
           if (url === EXPORT_DOCUMENT_URL && request.frame() === page.mainFrame()) {
+            let nonce = crypto.randomUUID();
             void request.respond({
               status: 200,
               contentType: "text/html",
-              headers: {"Content-Security-Policy": EXPORT_DOCUMENT_CSP},
-              body: makeExportHtml(clientCode, format.id),
+              headers: {"Content-Security-Policy": exportDocumentCsp(nonce)},
+              body: makeExportHtml(bundle, format.id, nonce),
             });
           } else {
             void request.abort();
