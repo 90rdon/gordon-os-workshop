@@ -320,23 +320,10 @@ describe("renderGadgetInBrowser", () => {
     expect(harness.exportDocument()).toContain(
       'globalThis.gadgetExportFormatId%20%3D%20%22test-format%22',
     );
+    expect(harness.exportDocumentCsp()).toContain("script-src data: 'unsafe-inline'");
     expect(harness.exportDocumentCsp()).toContain("img-src data: blob:");
     expect(harness.exportDocumentCsp()).toContain("media-src data: blob:");
     expect(harness.blobRequestContinued()).toBe(true);
-  });
-
-  it("admits the inline import map by a nonce unique to each render", async () => {
-    let nonces = [];
-    for (let i = 0; i < 2; i++) {
-      let { stream, harness } = render();
-      await collect(await stream);
-      let cspNonce = harness.exportDocumentCsp()?.match(/script-src [^;]*'nonce-([^']+)'/)?.[1];
-      let importMapTag = harness.exportDocument().match(/<script\b[^>]*\btype="importmap"[^>]*>/)?.[0];
-      expect(cspNonce).toBeTruthy();
-      expect(importMapTag?.match(/\bnonce="([^"]*)"/)?.[1]).toBe(cspNonce);
-      nonces.push(cspNonce);
-    }
-    expect(nonces[0]).not.toBe(nonces[1]);
   });
 
   it("exports an inert snapshot with locally bundled DOMPurify", async () => {

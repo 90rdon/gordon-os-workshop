@@ -38,13 +38,12 @@ const EXPORT_DOCUMENT_URL = "https://gadget-export.invalid/";
 // TODO: CSP and request interception do not cover WebRTC/STUN. The same gap exists for Gadgets
 // running inside an iframe in the user's browser. We should close the gap in both places. For now,
 // extending the same gap to remotely-rendered gadgets is acceptable.
-// Import maps must be inline; a per-render nonce admits the page's map without 'unsafe-inline'.
-function exportDocumentCsp(nonce: string): string {
-  return `default-src 'none'; frame-src 'none'; script-src data: 'nonce-${nonce}'; ` +
-    "style-src data: 'unsafe-inline'; img-src data: blob:; media-src data: blob:; " +
-    "font-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; " +
-    "connect-src 'none'; sandbox allow-scripts;";
-}
+// 'unsafe-inline' admits the inline import map, as in the live iframe; `data:` scripts already let
+// gadget code run anything.
+const EXPORT_DOCUMENT_CSP = "default-src 'none'; frame-src 'none'; " +
+  "script-src data: 'unsafe-inline'; style-src data: 'unsafe-inline'; " +
+  "img-src data: blob:; media-src data: blob:; font-src data:; object-src 'none'; " +
+  "base-uri 'none'; form-action 'none'; connect-src 'none'; sandbox allow-scripts;";
 const STATIC_HTML_CSP = "default-src 'none'; frame-src 'none'; script-src 'none'; " +
   "style-src data: 'unsafe-inline'; img-src data:; media-src data:; font-src data:; " +
   "object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none';";
@@ -134,7 +133,7 @@ function scriptUrl(source: string): string {
   return `data:text/javascript;charset=utf-8,${encodeURIComponent(source)}`;
 }
 
-function makeExportHtml(bundle: UiBundle, formatId: string, nonce: string): string {
+function makeExportHtml(bundle: UiBundle, formatId: string): string {
   let { entryUrl, importMap } = prepareUiPage(bundle);
   let runtimeUrl = scriptUrl(
       `globalThis.gadgetExportFormatId = ${JSON.stringify(formatId)};\n` +
@@ -145,7 +144,7 @@ function makeExportHtml(bundle: UiBundle, formatId: string, nonce: string): stri
 <html>
 <head>
   <meta charset="utf-8">
-  <script type="importmap" nonce="${nonce}">${importMap}</script>
+  <script type="importmap">${importMap}</script>
 </head>
 <body>
   <script src="${runtimeUrl}"></script>
@@ -214,12 +213,11 @@ export async function renderGadgetInBrowser(
         let url = request.url();
         if (request.isNavigationRequest()) {
           if (url === EXPORT_DOCUMENT_URL && request.frame() === page.mainFrame()) {
-            let nonce = crypto.randomUUID();
             void request.respond({
               status: 200,
               contentType: "text/html",
-              headers: {"Content-Security-Policy": exportDocumentCsp(nonce)},
-              body: makeExportHtml(bundle, format.id, nonce),
+              headers: {"Content-Security-Policy": EXPORT_DOCUMENT_CSP},
+              body: makeExportHtml(bundle, format.id),
             });
           } else {
             void request.abort();
