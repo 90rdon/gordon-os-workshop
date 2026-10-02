@@ -443,8 +443,11 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
           CLOUDFLARE_GATEWAY_ID: ${{ secrets.CF_AI_GATEWAY_NAME }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_AI_GATEWAY_TOKEN }}
-          # BONK_MODEL is a repository variable, shared by every Bonk workflow.
-          OPENCODE_CONFIG_CONTENT: '{"provider":{"cloudflare-ai-gateway":{"models":{"${{ vars.BONK_MODEL }}":{}}}},"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}'
+          # BONK_MODEL is a repository variable, shared by every Bonk workflow. It is declared a
+          # reasoning model because opencode gives a model missing from its bundled catalog no
+          # variants and then ignores `variant` silently. The date only has to be late enough
+          # for opencode to offer `xhigh`.
+          OPENCODE_CONFIG_CONTENT: '{"provider":{"cloudflare-ai-gateway":{"models":{"${{ vars.BONK_MODEL }}":{"reasoning":true,"release_date":"2026-09-29"}}}},"permission":{"*":"deny","read":"allow","grep":"allow","glob":"allow","list":"allow"}}'
         with:
           oidc_base_url: https://ask-bonk.cloudflare-exponent.workers.dev/auth
           model: "cloudflare-ai-gateway/${{ vars.BONK_MODEL }}"
