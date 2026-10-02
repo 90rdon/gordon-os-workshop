@@ -198,9 +198,15 @@ export type ChatHistory = {
 // step left the next request over the compaction trigger, so the pass ended for a reload; or the
 // pass summarized instead of prompting the model and this is the checkpoint to publish.
 type AgentPassOutcome =
-  | {type: "finished"}
+  | {type: "finished"; disposition: AgentTurnDisposition}
   | {type: "reloadForCompaction"}
   | {type: "compacted"; checkpoint: CompactionCheckpoint};
+
+/** Why an otherwise-successful agent loop stopped. */
+export type AgentTurnDisposition =
+  | "completed"
+  | "awaitingActionDecision"
+  | "awaitingConnection";
 
 /**
  * Summary of one of the workspace's gadgets, as needed by the agent: identity and its named
@@ -1174,13 +1180,14 @@ export async function runAgent(
     author: AiChatAuthorInfo,
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
-    modelConfig: AiModelConfig): Promise<void> {
+    modelConfig: AiModelConfig): Promise<AgentTurnDisposition> {
   while (true) {
     let history = hooks.loadChatHistory(chatId);
     let outcome = await runAgentPass(
         hooks, handle, chatId, author, history, abortSignal, initiator, modelConfig);
     if (outcome.type === "compacted") hooks.commitChatCompaction(chatId, outcome.checkpoint);
-    if (outcome.type === "finished" || isCompactionTurn(history.chatMessages)) return;
+    if (outcome.type === "finished") return outcome.disposition;
+    if (isCompactionTurn(history.chatMessages)) return "completed";
     abortSignal.throwIfAborted();
   }
 }
@@ -2771,7 +2778,7 @@ async function runAgentPass(
     }
   }
   // `/compact` ends the turn whether or not the boundary could advance; the model is never prompted.
-  if (compactionTurn) return {type: "finished"};
+  if (compactionTurn) return {type: "finished", disposition: "completed"};
 
   // Wraps a plain-text tool result (the exact text the model sees) with optional recorded notes
   // (see AiToolCall: observedCodeVersion, recorded output) riding along as pi `details` for the
@@ -3712,7 +3719,7 @@ async function runAgentPass(
     logger.warn("agent turn skipped: history ends with a completed assistant message", {
       event: "agent.turn.skipped", chatId,
     });
-    return {type: "finished"};
+    return {type: "finished", disposition: "completed"};
   }
 
   let context: AgentContext = {
@@ -3785,7 +3792,12 @@ async function runAgentPass(
         turnFailure.message, httpStatusFromError(turnFailure.message, handle.lastResponse));
   }
 
-  return {type: reloadForCompaction ? "reloadForCompaction" : "finished"};
+  if (reloadForCompaction) return {type: "reloadForCompaction"};
+  if (connectionRequested) return {type: "finished", disposition: "awaitingConnection"};
+  if (awaitingActionDecision) {
+    return {type: "finished", disposition: "awaitingActionDecision"};
+  }
+  return {type: "finished", disposition: "completed"};
 }
 
 /**
