@@ -2,7 +2,7 @@ import {SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT, type AiChatMessage, type AiMo
   from "@gadgets/workshop-shared/api";
 import {composeCodeChange, type CodeChange} from "@gadgets/workshop-shared/code-change";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
-import type {ChatBindingEntry, CompactionCheckpoint} from "./agent";
+import type {ChatBindingEntry, CompactionCheckpoint} from "./storage-schema/overseer-storage";
 import {zeroUsage} from "./ai-invoke";
 
 // Context compaction keeps long chats within the model's limit. It summarizes the messages before a
@@ -159,46 +159,6 @@ export function chatChangeStatuses(
     seen.push(msg.sequence);
   }
   return statuses;
-}
-
-/**
- * The code-log version a legacy (pre-git-storage) chat's Yjs doc base is anchored to: the
- * maximum over every version the chat's history references -- the active compaction checkpoint's
- * stamp, `observedCodeVersion` on tool calls and "changes" messages, and legacy merge messages'
- * `version`. A chat that references no version reads the legacy log's tip ("current"), which is
- * stable now that the log is read-only.
- *
- * The *maximum* matters, not the first stamp (the agent's own version-lock latch): a Yjs update
- * applies cleanly to any doc state that includes the state it was built against, and every update
- * in the log was built against the doc at *some* referenced version, so the max is the smallest
- * base that can represent them all. Anchoring lower silently loses content: a user draft
- * materialized while mainline was ahead of the agent's latch (its stamp is the then-current
- * version) can reference Yjs items the lower-anchored doc lacks, which Yjs then parks as pending
- * structs -- the edits just vanish from the flattened files. Merge versions are included so a
- * chat whose own accept was the last mainline movement anchors at the tip it created, keeping
- * the migration's pins (see git-migration.ts) fast-forwardable without a spurious
- * update-from-mainline round.
- *
- * Used by the git-storage migration's conversion anchor (the version its conversion change's pins
- * resolve at). Migration-internal: nothing else reads the legacy log anymore.
- */
-export function legacyChatBaseVersion(
-    checkpoint: CompactionCheckpoint | undefined,
-    messages: Iterable<AiChatMessage>): number | "current" {
-  let anchor = checkpoint?.observedCodeVersion;
-  let bump = (version: number | undefined) => {
-    if (version !== undefined && (anchor === undefined || version > anchor)) anchor = version;
-  };
-  for (let msg of messages) {
-    if (msg.type === "message") {
-      for (let call of msg.toolCalls ?? []) bump(call.observedCodeVersion);
-    } else if (msg.type === "changes") {
-      bump(msg.observedCodeVersion);
-    } else if (msg.type === "merge") {
-      bump(msg.version);
-    }
-  }
-  return anchor ?? "current";
 }
 
 /**
