@@ -13,11 +13,14 @@
 // commit *writes* (git-store.ts); tests cross-verify the two codecs over the same store.
 //
 // Everything here is pure computation over bytes (the pack decoder reads a stream): no storage,
-// no RPC. zlib comes from pako (the same library isomorphic-git bundles) because pack entries are
-// concatenated zlib streams with no recorded lengths -- finding where one ends requires a
-// streaming inflater that reports unconsumed input, which DecompressionStream cannot do.
+// no RPC. Loose objects use workerd's native node:zlib: storing a mount pack deflates every object
+// it carries, and pako's deflate takes about twice the CPU of the native one. The pack decoder
+// uses pako (the same library isomorphic-git bundles) because pack entries are concatenated zlib
+// streams with no recorded lengths -- finding where one ends requires a streaming inflater that
+// reports unconsumed input, which DecompressionStream cannot do.
 
-import { Inflate, deflate, inflate } from "pako";
+import { deflateSync, inflateSync } from "node:zlib";
+import { Inflate, deflate } from "pako";
 import type { GitObjectType, GitOid } from "@gadgets/workshop-shared/gatekeeper";
 
 const ENCODER = new TextEncoder();
@@ -77,14 +80,17 @@ export async function gitObjectOid(type: GitObjectType, payload: Uint8Array): Pr
 /** Encodes a loose object record's `data` bytes from a type and headerless payload. */
 export function encodeLooseObject(type: GitObjectType, payload: Uint8Array): Uint8Array {
   let header = ENCODER.encode(`${type} ${payload.byteLength}\0`);
-  return deflate(concatBytes([header, payload]));
+  return deflateSync(concatBytes([header, payload]));
 }
 
 /** Decodes a loose object record's `data` bytes into its type and headerless payload. */
 export function decodeLooseObject(data: Uint8Array): { type: GitObjectType, payload: Uint8Array } {
   let whole: Uint8Array;
   try {
-    whole = inflate(data);
+    // inflateSync returns a Buffer, a Uint8Array subclass whose slice() aliases rather than
+    // copies; the payload handed out is a plain Uint8Array over the same bytes.
+    let inflated = inflateSync(data);
+    whole = new Uint8Array(inflated.buffer, inflated.byteOffset, inflated.byteLength);
   } catch (err) {
     throw new Error(`corrupt loose git object: ${String(err)}`, { cause: err });
   }
