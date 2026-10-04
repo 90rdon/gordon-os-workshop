@@ -1635,9 +1635,19 @@ export interface GitCache extends RpcTarget {
   buildPack(): Promise<ReadableStream<Uint8Array>>;
 
   /**
-   * Consumes a standard git packfile and inserts all the objects within into the git cache. This
-   * is exactly equivalent to if the Gatekeeper decoded the packfile itself and `put()` each object
-   * into the cache.
+   * Consumes a standard git packfile, storing each object it holds as `put()` would: the oid is
+   * computed from the bytes, and the same proof of possession is recorded. Returns the oids of
+   * those objects that are now in the cache, which a `gitPull()` should check its requested
+   * oids against; an oid repeats if the pack repeats the object.
+   *
+   * Unlike a sequence of `put()`s:
+   * - An object over the cache's size limit is measured and left out of the result, where
+   *   `put()` would throw.
+   * - A delta must come after its base, as in every pack `git upload-pack` sends.
+   * - The pack is stored as it streams, so when the call rejects (the pack proves invalid, or
+   *   the stream fails) objects read before that may stay stored. Commits are stored last, once
+   *   the whole pack has verified and the rest of it is stored, so a failed pack does not leave
+   *   a commit without the trees that came with it.
    */
   consumePack(pack: ReadableStream<Uint8Array>): Promise<GitOid[]>;
 
