@@ -206,6 +206,73 @@ describe("pack decoding", () => {
         .rejects.toThrow(/entry size exceeds the 64-byte limit/);
   });
 
+  // A one-blob pack with its entry (header byte and zlib stream) rewritten and the trailer redone.
+  async function packOfEntry(payload: Uint8Array,
+                             rewrite: (entry: Uint8Array) => Uint8Array): Promise<Uint8Array> {
+    let pack = concatBytes(await buildPackBytes([{ type: "blob", payload }]));
+    let body = concatBytes([pack.subarray(0, 12), rewrite(pack.slice(12, -20))]);
+    return concatBytes([body, new Uint8Array(await crypto.subtle.digest("SHA-1", body))]);
+  }
+
+  it("rejects an entry whose data is not the size it declares", async () => {
+    let payload = new TextEncoder().encode("ten bytes.");
+    let declaring = (size: number) => packOfEntry(payload, entry => {
+      entry[0] = (3 << 4) | size;
+      return entry;
+    });
+    await expect(decodePack(await declaring(9))).rejects.toThrow(/larger than its declared/);
+    await expect(decodePack(await declaring(11))).rejects.toThrow(/smaller than its declared/);
+    expect((await decodePack(await declaring(10)))[0].payload).toStrictEqual(payload);
+    let oneByteDeclaredEmpty = await packOfEntry(new Uint8Array(1), entry => {
+      entry[0] = 3 << 4;
+      return entry;
+    });
+    await expect(decodePack(oneByteDeclaredEmpty)).rejects.toThrow(/larger than its declared/);
+  });
+
+  it("rejects an entry whose data is not a zlib stream", async () => {
+    let pack = await packOfEntry(new Uint8Array(10), entry => {
+      entry[1] ^= 0xff;
+      return entry;
+    });
+    await expect(decodePack(pack)).rejects.toThrow(/corrupt object data/);
+  });
+
+  it("decodes an entry that spans many reads, however the pack is chunked", async () => {
+    // Random bytes do not compress, so the entry's stream is three read buffers long.
+    let payload = new Uint8Array(200_000);
+    for (let pos = 0; pos < payload.length; pos += 50_000) {
+      crypto.getRandomValues(payload.subarray(pos, pos + 50_000));
+    }
+    let after = new TextEncoder().encode("the entry after it");
+    let pack = concatBytes(await buildPackBytes(
+        [{ type: "blob", payload }, { type: "blob", payload: after }]));
+    for (let step of [undefined, 1000]) {
+      let objects = await decodePack(pack, { step });
+      expect(objects.map(o => o.payload)).toStrictEqual([payload, after]);
+    }
+  });
+
+  it("decodes an entry whose stream is longer than zlib would make it", async () => {
+    // Fifty empty stored blocks, then the payload in a final stored block and its Adler-32: a
+    // valid stream several times the length the first attempt allows for.
+    let payload = new TextEncoder().encode("padded out");
+    let a = 1, b = 0;
+    for (let byte of payload) {
+      a = (a + byte) % 65521;
+      b = (b + a) % 65521;
+    }
+    let pack = await packOfEntry(payload, entry => concatBytes([
+      entry.subarray(0, 1),
+      new Uint8Array([0x78, 0x01]),
+      ...Array.from({ length: 50 }, () => new Uint8Array([0, 0, 0, 0xff, 0xff])),
+      new Uint8Array([1, payload.length, 0, ~payload.length & 0xff, 0xff]),
+      payload,
+      new Uint8Array([b >> 8, b & 0xff, a >> 8, a & 0xff]),
+    ]));
+    expect((await decodePack(pack))[0].payload).toStrictEqual(payload);
+  });
+
   it("enforces the pack size cap", async () => {
     let pack = b64Bytes(PACK_NO_DELTA);
     await expect(decodePack(pack, { maxPackSize: pack.length - 1 }))
