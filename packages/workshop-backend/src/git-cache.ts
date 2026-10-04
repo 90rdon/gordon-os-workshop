@@ -80,9 +80,10 @@ const logger = createWorkshopLogger("workshop.git-cache");
 export const MAX_GIT_OBJECT_SIZE = 1 << 20;
 
 /**
- * Maximum byte size of a packfile accepted by `consumePack()` (matching the transfer-size
- * limiter gatekeepers are expected to apply to fetch bodies). A pack streams through, so this
- * bounds what one pull may download, decode and store, not memory.
+ * Maximum byte size of a packfile accepted by `consumePack()`. A pack streams through, so this
+ * bounds what one pull may download, decode and store, not memory. It is the one limit on a
+ * pull's size: a gatekeeper need not bound its own fetch, because a pack over this fails here
+ * and the stream it was read from is cancelled.
  */
 export const MAX_GIT_PACK_BYTES = 256 << 20;
 
