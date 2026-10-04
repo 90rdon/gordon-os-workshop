@@ -1183,15 +1183,21 @@ export class WorkspaceGitCache {
   // The shared put()-equivalent store step (callers wrap in a transaction): an object over
   // MAX_GIT_OBJECT_SIZE is only measured, returning false. Anything else is stored, with proof of
   // possession and referent pull-routing rows recorded and pending-push marks propagated to the
-  // referents now that they are visible.
+  // referents now that they are visible. An object this gatekeeper already stored is left alone:
+  // a pull sends no `have`s, so a retried pull, or one for the next commit of a mounted
+  // repository, is mostly such objects.
   #storeVerifiedObject(gatekeeperId: WorkpieceId, oid: GitOid, { type, payload }: PackableObject)
       : boolean {
     if (payload.byteLength > MAX_GIT_OBJECT_SIZE) {
       this.#recordOversized(gatekeeperId, oid, type, payload.byteLength);
       return false;
     }
-    this.storage.gitObjects.put({ oid, data: encodeLooseObject(type, payload) });
     let { meta } = this.#metaFor(gatekeeperId, oid, type, "measured");
+    if (meta.size !== undefined && meta.onRemote.includes(gatekeeperId) &&
+        this.hasLocalObject(oid)) {
+      return true;
+    }
+    this.storage.gitObjects.put({ oid, data: encodeLooseObject(type, payload) });
     addUnique(meta.onRemote, gatekeeperId);
     meta.size = payload.byteLength;
     this.storage.gitObjectMetadata.put(meta);

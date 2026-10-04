@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { deflate } from "pako";
 import type { GitPullHints, GitOid } from "@gadgets/workshop-shared/gatekeeper";
 import { READ_FILES_RESPONSE_BUDGET } from "@gadgets/workshop-shared/api";
@@ -811,6 +811,20 @@ describe("consumePack", () => {
       expect(meta.onRemote).toStrictEqual([G1]);
       expect(meta.pullableFrom).toStrictEqual([]);
     }
+  });
+
+  it("writes nothing when the same gatekeeper sends a pack again", async () => {
+    // A pull carries no `have`s, so a retry, or the next commit of a mounted repository, is
+    // mostly objects already stored.
+    let t = makeCache();
+    let stub = new GitCacheImpl(t.cache, G1);
+    let first = await stub.consumePack(byteStream(b64Bytes(PACK_OFS_DELTA)));
+    let objectPuts = vi.spyOn(t.storage.gitObjects, "put");
+    let metadataPuts = vi.spyOn(t.storage.gitObjectMetadata, "put");
+    let again = await stub.consumePack(byteStream(b64Bytes(PACK_OFS_DELTA)));
+    expect(new Set(again)).toStrictEqual(new Set(first));
+    expect(objectPuts).not.toHaveBeenCalled();
+    expect(metadataPuts).not.toHaveBeenCalled();
   });
 
   it("rejects corrupt input without storing its commits or trees", async () => {
