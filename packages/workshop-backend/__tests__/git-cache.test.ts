@@ -9,6 +9,7 @@ import {
   GitCacheImpl,
   GitObjectTooLargeError,
   MAX_GIT_OBJECT_SIZE,
+  MAX_OVERSIZED_BASE_BYTES,
   WorkspaceGitCache,
 } from "../src/git-cache";
 import { GitStore, blobOid } from "../src/git-store";
@@ -936,6 +937,38 @@ describe("consumePack", () => {
     expect(stored).toStrictEqual([await gitObjectOid("blob", target)]);
     expect(t.cache.readLocalObject(stored[0])!.payload).toStrictEqual(target);
     expect(t.storage.gitObjectMetadata.get(bigOid)!.size).toBe(big.byteLength);
+  });
+
+  it("lets the oldest oversized base go once they pass the budget", async () => {
+    // Two blobs that pass it together, so only the second is still on hand for a delta.
+    let size = MAX_OVERSIZED_BASE_BYTES / 2 + 1;
+    let bigs = [1, 2].map(fill => new Uint8Array(size).fill(fill));
+    let prefix = concatBytes(await buildPackBytes(
+        bigs.map(payload => ({ type: "blob" as const, payload })))).slice(0, -20);
+    new DataView(prefix.buffer).setUint32(8, 3);
+    // Delta: the base size as a varint, target size 16, then a 16-byte copy from offset 0.
+    let delta: number[] = [];
+    for (let rest = size; rest > 0; rest >>>= 7) {
+      delta.push(rest > 0x7f ? rest & 0x7f | 0x80 : rest);
+    }
+    delta.push(16, 0x90, 16);
+    let consumeWithDeltaOn = async (base: Uint8Array) => {
+      let oid = await gitObjectOid("blob", base);
+      let body = concatBytes([prefix, new Uint8Array([(7 << 4) | delta.length]),
+        Uint8Array.from(oid.match(/../g)!, h => parseInt(h, 16)), deflate(new Uint8Array(delta))]);
+      let pack = concatBytes([body, new Uint8Array(await crypto.subtle.digest("SHA-1", body))]);
+      let t = makeCache();
+      return { t, oid, stored: new GitCacheImpl(t.cache, G1).consumePack(byteStream(pack)) };
+    };
+
+    let recent = await consumeWithDeltaOn(bigs[1]);
+    let target = await gitObjectOid("blob", bigs[1].subarray(0, 16));
+    expect(await recent.stored).toStrictEqual([target]);
+
+    let dropped = await consumeWithDeltaOn(bigs[0]);
+    await expect(dropped.stored).rejects.toThrow(`delta base ${dropped.oid} is unavailable`);
+    // Both were measured before that, which is what keeps them out of the next pull.
+    expect(dropped.t.storage.gitObjectMetadata.get(dropped.oid)?.size).toBe(size);
   });
 });
 

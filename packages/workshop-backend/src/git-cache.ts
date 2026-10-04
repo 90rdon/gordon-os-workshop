@@ -87,6 +87,13 @@ export const MAX_GIT_OBJECT_SIZE = 1 << 20;
 export const MAX_GIT_PACK_BYTES = 64 << 20;
 
 /**
+ * How many bytes of oversized objects `consumePack()` keeps at once as bases a later delta may
+ * name. They are never stored, and a blob fetch can carry any number of them inflated, which
+ * the pack's own size cap does not bound.
+ */
+export const MAX_OVERSIZED_BASE_BYTES = 32 << 20;
+
+/**
  * Blob size fetched eagerly when pulling a worktree base: the pull requests the base commit with
  * `filterBlobSize: EAGER_BLOB_LIMIT`, so the commit, its full tree structure, and every blob
  * under this limit arrive in one fetch, and only genuinely large files pay a lazy fault's
@@ -259,20 +266,24 @@ export class WorkspaceGitCache {
    * with no transaction around each: what can fail partway through a store is parsing the
    * objects it names, and a blob names none. An oversized object is measured as it arrives, so
    * a pull that is cut short still leaves the size for later reads to fail fast on, and is then
-   * kept to the end, as a later delta may name it as its base. Commits, trees and tags are held
-   * until the whole pack has verified, then stored, one object per transaction, with commits
-   * last: a commit's local presence is what lets `fetchCommit` mount it and skip ever pulling it
-   * again, so no commit is stored before every other held object is. A store that throws rolls
-   * back only its own object, so a failure partway can leave verified trees, the root tree
-   * included, with no commit: nothing treats those as mounted, and lazy reads fault around
-   * them. No await separates these stores, so they still reach disk together; one transaction
-   * around them all would also undo the earlier objects when a later one throws, but in
-   * production it nearly doubled a vscode-size mount's CPU.
+   * kept as a base a later delta may name. Those are let go oldest first once they pass
+   * MAX_OVERSIZED_BASE_BYTES, git writing a delta soon after its base; a delta that does name
+   * one let go fails the pack, and the sizes already recorded keep those objects out of the
+   * next pull. Commits, trees and tags are held until the whole pack has verified, then stored,
+   * one object per transaction, with commits last: a commit's local presence is what lets
+   * `fetchCommit` mount it and skip ever pulling it again, so no commit is stored before every
+   * other held object is. A store that throws rolls back only its own object, so a failure
+   * partway can leave verified trees, the root tree included, with no commit: nothing treats
+   * those as mounted, and lazy reads fault around them. No await separates these stores, so
+   * they still reach disk together; one transaction around them all would also undo the
+   * earlier objects when a later one throws, but in production it nearly doubled a vscode-size
+   * mount's CPU.
    */
   async consumePackFromGatekeeper(gatekeeperId: WorkpieceId, pack: ReadableStream<Uint8Array>)
       : Promise<GitOid[]> {
     let held = new Map<GitOid, PackableObject>();
     let oversized = new Map<GitOid, PackableObject>();
+    let oversizedBytes = 0;
     let stored: GitOid[] = [];
     let objects = decodePackStream(pack, {
       maxPackSize: MAX_GIT_PACK_BYTES,
@@ -284,8 +295,15 @@ export class WorkspaceGitCache {
         held.set(oid, object);
       } else if (this.#storeVerifiedObject(gatekeeperId, oid, object)) {
         stored.push(oid);
-      } else {
+      } else if (!oversized.has(oid)) {
         oversized.set(oid, object);
+        oversizedBytes += object.payload.byteLength;
+        // Oldest out first, and never the one just added.
+        for (let [oldest, { payload }] of oversized) {
+          if (oversizedBytes <= MAX_OVERSIZED_BASE_BYTES || oldest === oid) break;
+          oversized.delete(oldest);
+          oversizedBytes -= payload.byteLength;
+        }
       }
     }
     let commitsLast = [...held].toSorted(([, a], [, b]) =>
