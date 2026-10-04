@@ -869,6 +869,18 @@ describe("consumePack", () => {
     expect(meta.onRemote).toStrictEqual([G1]);
   });
 
+  it("measures an oversized entry even when the pack then fails", async () => {
+    // The recorded size is what lets a later read fail fast instead of pulling the object again.
+    let t = makeCache();
+    let big = new Uint8Array(MAX_GIT_OBJECT_SIZE + 5).fill(0x7a);
+    let pack = concatBytes(await buildPackBytes([{ type: "blob", payload: big }]));
+    pack[pack.length - 1] ^= 0xff;
+    await expect(new GitCacheImpl(t.cache, G1).consumePack(byteStream(pack)))
+        .rejects.toThrow(/trailer SHA-1 mismatch/);
+    expect(t.storage.gitObjectMetadata.get(await gitObjectOid("blob", big))?.size)
+        .toBe(big.byteLength);
+  });
+
   it("resolves a delta against an oversized base it declines to store", async () => {
     // How git packs a file similar to a large one (e.g. a second lockfile in a whole-tree blob
     // pull), hand-built: the large blob, then a ref-delta copying its first 16 bytes.

@@ -255,40 +255,44 @@ export class WorkspaceGitCache {
    * absent from the returned list, which is how a gitPull implementation notices). Returns the
    * stored oids.
    *
-   * The pack streams through: small blobs, the bulk of a checkout, are stored as they arrive.
-   * Everything else -- oversized blobs included, as a later delta may name one as its base -- is
-   * held until the whole pack has verified, then stored the same way, one object per
-   * transaction, with commits last: a commit's local presence is what lets `fetchCommit` mount
-   * it and skip ever pulling it again, so no commit is stored before every other held object is.
-   * A store that throws rolls back only its own object, so a failure partway can leave verified
-   * trees, the root tree included, with no commit: nothing treats those as mounted, and lazy
-   * reads fault around them. No await separates these stores, so they still reach disk
-   * together; one transaction around them all would also undo the earlier objects when a later
-   * one throws, but in production it nearly doubled a vscode-size mount's CPU.
+   * The pack streams through. Small blobs, the bulk of a checkout, are stored as they arrive.
+   * An oversized object is measured as it arrives, so a pull that is cut short still leaves the
+   * size for later reads to fail fast on, and is then kept to the end, as a later delta may name
+   * it as its base. Commits, trees and tags are held until the whole pack has verified, then
+   * stored, one object per transaction, with commits last: a commit's local presence is what
+   * lets `fetchCommit` mount it and skip ever pulling it again, so no commit is stored before
+   * every other held object is. A store that throws rolls back only its own object, so a
+   * failure partway can leave verified trees, the root tree included, with no commit: nothing
+   * treats those as mounted, and lazy reads fault around them. No await separates these stores,
+   * so they still reach disk together; one transaction around them all would also undo the
+   * earlier objects when a later one throws, but in production it nearly doubled a vscode-size
+   * mount's CPU.
    */
   async consumePackFromGatekeeper(gatekeeperId: WorkpieceId, pack: ReadableStream<Uint8Array>)
       : Promise<GitOid[]> {
     let held = new Map<GitOid, PackableObject>();
+    let oversized = new Map<GitOid, PackableObject>();
     let stored: GitOid[] = [];
     let objects = decodePackStream(pack, {
       maxPackSize: MAX_GIT_PACK_BYTES,
       maxObjectSize: MAX_GIT_PACK_BYTES,
-      resolveBase: oid => held.get(oid) ?? this.readLocalObject(oid),
+      resolveBase: oid => held.get(oid) ?? oversized.get(oid) ?? this.readLocalObject(oid),
     });
     for await (let { oid, ...object } of objects) {
-      if (object.type === "blob" && object.payload.byteLength <= MAX_GIT_OBJECT_SIZE) {
-        this.storage.transaction(() => this.#storeVerifiedObject(gatekeeperId, oid, object));
+      if (object.type !== "blob" && object.payload.byteLength <= MAX_GIT_OBJECT_SIZE) {
+        held.set(oid, object);
+      } else if (this.storage.transaction(
+          () => this.#storeVerifiedObject(gatekeeperId, oid, object))) {
         stored.push(oid);
       } else {
-        held.set(oid, object);
+        oversized.set(oid, object);
       }
     }
     let commitsLast = [...held].toSorted(([, a], [, b]) =>
         Number(a.type === "commit") - Number(b.type === "commit"));
     for (let [oid, object] of commitsLast) {
-      if (this.storage.transaction(() => this.#storeVerifiedObject(gatekeeperId, oid, object))) {
-        stored.push(oid);
-      }
+      this.storage.transaction(() => this.#storeVerifiedObject(gatekeeperId, oid, object));
+      stored.push(oid);
     }
     return stored;
   }
