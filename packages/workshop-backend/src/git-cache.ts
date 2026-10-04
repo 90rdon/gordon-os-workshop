@@ -1158,10 +1158,14 @@ export class WorkspaceGitCache {
     return { meta, dirty };
   }
 
-  // Records an assertion-grade pull-routing hint (advertisement or put-referent).
+  // Records an assertion-grade pull-routing hint (advertisement or put-referent). A gatekeeper
+  // already in `onRemote` needs none: proof routes pulls and bounds the marking walk by itself.
+  // (consumePack stores a pack's blobs before the trees naming them, so that is most referents.)
   #recordPullable(gatekeeperId: WorkpieceId, oid: GitOid, type: GitObjectType): void {
     let { meta, dirty } = this.#metaFor(gatekeeperId, oid, type, "asserted");
-    if (addUnique(meta.pullableFrom, gatekeeperId) || dirty) {
+    let hinted = !meta.onRemote.includes(gatekeeperId) &&
+        addUnique(meta.pullableFrom, gatekeeperId);
+    if (hinted || dirty) {
       this.storage.gitObjectMetadata.put(meta);
     }
   }

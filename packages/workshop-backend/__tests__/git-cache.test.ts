@@ -802,6 +802,17 @@ describe("consumePack", () => {
     expect(t.storage.gitObjectMetadata.get(GITLINK_TARGET)).toBeUndefined();
   });
 
+  it("records no pull-routing hint for a blob the pack itself delivered", async () => {
+    // The blobs are stored before the trees naming them, and proof is already a pull source.
+    let t = makeCache();
+    await new GitCacheImpl(t.cache, G1).consumePack(byteStream(b64Bytes(PACK_OFS_DELTA)));
+    for (let oid of PACKED_OIDS.filter(o => fixture(o).type === "blob")) {
+      let meta = t.storage.gitObjectMetadata.get(oid)!;
+      expect(meta.onRemote).toStrictEqual([G1]);
+      expect(meta.pullableFrom).toStrictEqual([]);
+    }
+  });
+
   it("rejects corrupt input without storing its commits or trees", async () => {
     let t = makeCache();
     let bytes = b64Bytes(PACK_OFS_DELTA).slice();
