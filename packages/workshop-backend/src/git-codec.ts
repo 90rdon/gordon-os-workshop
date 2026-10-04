@@ -428,7 +428,8 @@ const PACK_READ_SIZE = 64 << 10;
 // Workers RPC has carried it to the overseer (verified for the gatekeepers' pull-based stream
 // shape): a default reader gets 4 KiB chunks there, and each read after one of the caller's
 // storage writes costs an implicit commit (a TypeScript-size pack took 7.0 s of reads instead of
-// 2.8 s, in workerd).
+// 2.8 s, in workerd). Each read waits for a full buffer, because a BYOB read otherwise returns as
+// soon as one of the source's chunks arrives, and GitHub sends a pack mostly in 8 KiB pieces.
 class PackReader {
   #reader: ReadableStreamBYOBReader;
   #maxSize: number;
@@ -452,7 +453,7 @@ class PackReader {
   /** Whether any bytes remain, buffering at least one if so. */
   async more(): Promise<boolean> {
     while (this.#pos === this.#chunk.byteLength) {
-      let next = await this.#reader.read(new Uint8Array(PACK_READ_SIZE));
+      let next = await this.#reader.readAtLeast(PACK_READ_SIZE, new Uint8Array(PACK_READ_SIZE));
       if (next.done) return false;
       this.#received += next.value.byteLength;
       if (this.#received > this.#maxSize) {
