@@ -206,11 +206,13 @@ describe("pack decoding", () => {
         .rejects.toThrow(/entry size exceeds the 64-byte limit/);
   });
 
-  // A one-blob pack with its entry (header byte and zlib stream) rewritten and the trailer redone.
-  async function packOfEntry(payload: Uint8Array,
-                             rewrite: (entry: Uint8Array) => Uint8Array): Promise<Uint8Array> {
+  // A one-blob pack with its entry (header byte and zlib stream) rewritten, declaring `count`
+  // entries, and the trailer redone.
+  async function packOfEntry(payload: Uint8Array, rewrite: (entry: Uint8Array) => Uint8Array,
+                             count = 1): Promise<Uint8Array> {
     let pack = concatBytes(await buildPackBytes([{ type: "blob", payload }]));
     let body = concatBytes([pack.subarray(0, 12), rewrite(pack.slice(12, -20))]);
+    new DataView(body.buffer).setUint32(8, count);
     return concatBytes([body, new Uint8Array(await crypto.subtle.digest("SHA-1", body))]);
   }
 
@@ -290,6 +292,20 @@ describe("pack decoding", () => {
     let options = { maxPackSize: Infinity, maxObjectSize: 1, resolveBase: () => undefined };
     await expect(decodePackStream(pack, options).next()).rejects.toThrow(/bad magic/);
     expect(cancelled).toBe(true);
+  });
+
+  it("rejects a ref-delta whose base comes later in the pack", async () => {
+    // The format allows it, but git writes a base before its deltas, and one pass cannot wait.
+    let base = new TextEncoder().encode("hello base content");
+    let baseOid = await gitObjectOid("blob", base);
+    let delta = new Uint8Array([base.length, base.length, 0x91, 0, base.length]);
+    let pack = await packOfEntry(base, entry => concatBytes([
+      new Uint8Array([(7 << 4) | delta.length]),
+      Uint8Array.from(baseOid.match(/../g)!, h => parseInt(h, 16)),
+      deflate(delta),
+      entry,
+    ]), 2);
+    await expect(decodePack(pack)).rejects.toThrow(`delta base ${baseOid} is unavailable`);
   });
 
   it("fails a ref-delta whose base is nowhere, and resolves it via resolveBase", async () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { env, type WorkerEntrypoint } from "cloudflare:workers";
 import { deflate } from "pako";
 import type { GitPullHints, GitOid } from "@gadgets/workshop-shared/gatekeeper";
 import { READ_FILES_RESPONSE_BUDGET } from "@gadgets/workshop-shared/api";
@@ -800,6 +801,40 @@ describe("consumePack", () => {
     }
     // Referent recording ran: the gitlink target still has no row.
     expect(t.storage.gitObjectMetadata.get(GITLINK_TARGET)).toBeUndefined();
+  });
+
+  it("consumes a pack another Worker streams in, as a gatekeeper's arrives", async () => {
+    // What production sees is not the byte stream the other tests build: gatekeeper-github's
+    // demuxGitFetchResponse makes a default stream, and Workers RPC carries it to the overseer.
+    type PackSender = WorkerEntrypoint & {
+      send(cache: GitCacheImpl, pack: Uint8Array, piece: number): Promise<GitOid[]>;
+    };
+    let t = makeCache();
+    let sender = env.LOADER.get(null, () => ({
+      compatibilityDate: "2026-02-01",
+      mainModule: "sender.js",
+      modules: {
+        "sender.js": `
+          import { WorkerEntrypoint } from "cloudflare:workers";
+          export class Sender extends WorkerEntrypoint {
+            async send(cache, pack, piece) {
+              let pos = 0;
+              return await cache.consumePack(new ReadableStream({
+                pull(controller) {
+                  if (pos < pack.byteLength) controller.enqueue(pack.slice(pos, pos += piece));
+                  else controller.close();
+                },
+              }));
+            }
+          }`,
+      },
+      globalOutbound: null,
+    })).getEntrypoint<PackSender>("Sender");
+    let stored = await sender.send(new GitCacheImpl(t.cache, G1), b64Bytes(PACK_OFS_DELTA), 100);
+    expect(new Set(stored)).toStrictEqual(new Set(PACKED_OIDS));
+    for (let oid of PACKED_OIDS) {
+      expect(t.cache.readLocalObject(oid)).toStrictEqual(fixture(oid));
+    }
   });
 
   it("records no pull-routing hint for a blob the pack itself delivered", async () => {
