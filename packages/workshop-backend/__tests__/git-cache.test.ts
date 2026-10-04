@@ -9,6 +9,7 @@ import {
   GitCacheImpl,
   GitObjectTooLargeError,
   MAX_GIT_OBJECT_SIZE,
+  MAX_GIT_PACK_OBJECT_SIZE,
   MAX_OVERSIZED_BASE_BYTES,
   WorkspaceGitCache,
 } from "../src/git-cache";
@@ -903,6 +904,22 @@ describe("consumePack", () => {
     let meta = t.storage.gitObjectMetadata.get(bigOid)!;
     expect(meta.size).toBe(MAX_GIT_OBJECT_SIZE + 5);
     expect(meta.onRemote).toStrictEqual([G1]);
+  });
+
+  it("caps one object at MAX_GIT_PACK_OBJECT_SIZE, however large a pack may be", async () => {
+    // An entry that only declares a size over the cap: it is refused before anything inflates.
+    let size = MAX_GIT_PACK_OBJECT_SIZE + 1;
+    let entry = [0x80 | (3 << 4) | (size & 0x0f)];
+    for (let rest = Math.floor(size / 16); rest > 0; rest >>>= 7) {
+      entry.push(rest > 0x7f ? rest & 0x7f | 0x80 : rest);
+    }
+    let body = concatBytes([
+      concatBytes(await buildPackBytes([])).subarray(0, 12), new Uint8Array(entry),
+      deflate(new Uint8Array(1))]);
+    new DataView(body.buffer).setUint32(8, 1);
+    let pack = concatBytes([body, new Uint8Array(await crypto.subtle.digest("SHA-1", body))]);
+    await expect(new GitCacheImpl(makeCache().cache, G1).consumePack(byteStream(pack)))
+        .rejects.toThrow(`entry of ${size} bytes exceeds the ${size - 1}-byte limit`);
   });
 
   it("measures an oversized entry even when the pack then fails", async () => {

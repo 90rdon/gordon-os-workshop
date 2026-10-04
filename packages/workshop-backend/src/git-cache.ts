@@ -81,10 +81,17 @@ export const MAX_GIT_OBJECT_SIZE = 1 << 20;
 
 /**
  * Maximum byte size of a packfile accepted by `consumePack()` (matching the transfer-size
- * limiter gatekeepers are expected to apply to fetch bodies), and the hard per-object
- * inflation bound while decoding one.
+ * limiter gatekeepers are expected to apply to fetch bodies). A pack streams through, so this
+ * bounds what one pull may download, decode and store, not memory.
  */
-export const MAX_GIT_PACK_BYTES = 64 << 20;
+export const MAX_GIT_PACK_BYTES = 256 << 20;
+
+/**
+ * Hard cap on any one object inflated while decoding a pack. This one is a memory bound, so it
+ * does not grow with MAX_GIT_PACK_BYTES. It sits well above MAX_GIT_OBJECT_SIZE so that an
+ * object too large to store can still be measured, and serve as the base of a delta.
+ */
+export const MAX_GIT_PACK_OBJECT_SIZE = 64 << 20;
 
 /**
  * How many bytes of oversized objects `consumePack()` keeps at once as bases a later delta may
@@ -292,7 +299,7 @@ export class WorkspaceGitCache {
     let stored: GitOid[] = [];
     let objects = decodePackStream(pack, {
       maxPackSize: MAX_GIT_PACK_BYTES,
-      maxObjectSize: MAX_GIT_PACK_BYTES,
+      maxObjectSize: MAX_GIT_PACK_OBJECT_SIZE,
       resolveBase: oid => held.get(oid) ?? oversized.get(oid) ?? this.readLocalObject(oid),
     });
     for await (let { oid, ...object } of objects) {
