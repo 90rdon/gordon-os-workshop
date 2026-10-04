@@ -939,36 +939,84 @@ describe("consumePack", () => {
     expect(t.storage.gitObjectMetadata.get(bigOid)!.size).toBe(big.byteLength);
   });
 
-  it("lets the oldest oversized base go once they pass the budget", async () => {
-    // Two blobs that pass it together, so only the second is still on hand for a delta.
-    let size = MAX_OVERSIZED_BASE_BYTES / 2 + 1;
-    let bigs = [1, 2].map(fill => new Uint8Array(size).fill(fill));
-    let prefix = concatBytes(await buildPackBytes(
-        bigs.map(payload => ({ type: "blob" as const, payload })))).slice(0, -20);
-    new DataView(prefix.buffer).setUint32(8, 3);
+  // Two blobs that pass MAX_OVERSIZED_BASE_BYTES together, as pack entries. Deflating them is
+  // most of what these tests cost, so it is done once.
+  type BigBlobs = { bigs: Uint8Array[], oids: GitOid[], entries: Uint8Array };
+  let twoBigBlobs: Promise<BigBlobs> | undefined;
+  function bigBlobs(): Promise<BigBlobs> {
+    return twoBigBlobs ??= (async () => {
+      let bigs = [1, 2].map(
+          fill => new Uint8Array(MAX_OVERSIZED_BASE_BYTES / 2 + 1).fill(fill));
+      let pack = concatBytes(await buildPackBytes(
+          bigs.map(payload => ({ type: "blob" as const, payload }))));
+      let oids = await Promise.all(bigs.map(big => gitObjectOid("blob", big)));
+      return { bigs, oids, entries: pack.slice(12, -20) };
+    })();
+  }
+
+  // A pack of any `leading` objects, the two big blobs, and a ref-delta copying the first 16
+  // bytes of one of them (the `target`).
+  async function packOfTwoBigBlobs(deltaOn: 0 | 1, leading: PackableObject[] = []) {
+    let { bigs, oids, entries } = await bigBlobs();
+    let size = bigs[0].byteLength;
     // Delta: the base size as a varint, target size 16, then a 16-byte copy from offset 0.
     let delta: number[] = [];
     for (let rest = size; rest > 0; rest >>>= 7) {
       delta.push(rest > 0x7f ? rest & 0x7f | 0x80 : rest);
     }
     delta.push(16, 0x90, 16);
-    let consumeWithDeltaOn = async (base: Uint8Array) => {
-      let oid = await gitObjectOid("blob", base);
-      let body = concatBytes([prefix, new Uint8Array([(7 << 4) | delta.length]),
-        Uint8Array.from(oid.match(/../g)!, h => parseInt(h, 16)), deflate(new Uint8Array(delta))]);
-      let pack = concatBytes([body, new Uint8Array(await crypto.subtle.digest("SHA-1", body))]);
-      let t = makeCache();
-      return { t, oid, stored: new GitCacheImpl(t.cache, G1).consumePack(byteStream(pack)) };
-    };
+    let body = concatBytes([
+      concatBytes(await buildPackBytes(leading)).slice(0, -20),
+      entries,
+      new Uint8Array([(7 << 4) | delta.length]),
+      Uint8Array.from(oids[deltaOn].match(/../g)!, h => parseInt(h, 16)),
+      deflate(new Uint8Array(delta)),
+    ]);
+    new DataView(body.buffer).setUint32(8, leading.length + 3);
+    let pack = concatBytes([body, new Uint8Array(await crypto.subtle.digest("SHA-1", body))]);
+    let target = bigs[deltaOn].subarray(0, 16);
+    return { pack, oids, size, target, targetOid: await gitObjectOid("blob", target) };
+  }
 
-    let recent = await consumeWithDeltaOn(bigs[1]);
-    let target = await gitObjectOid("blob", bigs[1].subarray(0, 16));
-    expect(await recent.stored).toStrictEqual([target]);
+  it("lets the oldest oversized base go from a pack of blobs past the budget", async () => {
+    // Only the second blob is still on hand by the time a delta names a base.
+    let recent = await packOfTwoBigBlobs(1);
+    expect(await new GitCacheImpl(makeCache().cache, G1).consumePack(byteStream(recent.pack)))
+        .toStrictEqual([recent.targetOid]);
 
-    let dropped = await consumeWithDeltaOn(bigs[0]);
-    await expect(dropped.stored).rejects.toThrow(`delta base ${dropped.oid} is unavailable`);
-    // Both were measured before that, which is what keeps them out of the next pull.
-    expect(dropped.t.storage.gitObjectMetadata.get(dropped.oid)?.size).toBe(size);
+    let t = makeCache();
+    let dropped = await packOfTwoBigBlobs(0);
+    await expect(new GitCacheImpl(t.cache, G1).consumePack(byteStream(dropped.pack)))
+        .rejects.toThrow(`delta base ${dropped.oids[0]} is unavailable`);
+    expect(t.storage.gitObjectMetadata.get(dropped.oids[0])?.size).toBe(dropped.size);
+  });
+
+  it("keeps every oversized base in a pack that carries a commit", async () => {
+    // Such a pack answers a want for the commit and would be sent again unchanged, so failing
+    // it on a dropped base would fail the mount for good.
+    let t = makeCache();
+    let commit = commitPayload(await gitObjectOid("tree", new Uint8Array(0)), [], "big files\n");
+    let { pack, targetOid } = await packOfTwoBigBlobs(0, [{ type: "commit", payload: commit }]);
+    let stored = await new GitCacheImpl(t.cache, G1).consumePack(byteStream(pack));
+    expect(stored).toStrictEqual([targetOid, await gitObjectOid("commit", commit)]);
+  });
+
+  it("reads a batch of blobs whose pack failed on a dropped base", async () => {
+    // The failed pack measured the two big blobs, so the same read asks again without them, and
+    // the blob that was a delta on one arrives whole.
+    let t = makeCache();
+    let { pack, oids, target, targetOid } = await packOfTwoBigBlobs(0);
+    let wanted = [...oids, targetOid];
+    await t.cache.putFromGatekeeper(G1, "tree", treePayload(
+        wanted.map((oid, i) => ({ mode: "100644", name: `file-${i}`, oid }))));
+    t.sources.set(G1, async asked => {
+      let answer = asked.includes(oids[0]) ? pack
+          : concatBytes(await buildPackBytes([{ type: "blob", payload: target }]));
+      await t.cache.consumePackFromGatekeeper(G1, byteStream(answer));
+    });
+    expect(await t.cache.ensureBlobs(wanted)).toStrictEqual(new Set(oids));
+    expect(t.cache.readLocalObject(targetOid)?.payload).toStrictEqual(target);
+    expect(t.pulls.map(pull => pull.oids)).toStrictEqual([wanted, [targetOid]]);
   });
 });
 
