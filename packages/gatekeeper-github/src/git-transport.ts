@@ -349,12 +349,11 @@ async function* demuxPackData(
 // Reads the next chunk of a fetch body, failing if none arrives within GIT_FETCH_STALL_MS.
 async function readOrStall(reader: ReadableStreamDefaultReader<Uint8Array>)
     : Promise<ReadableStreamReadResult<Uint8Array>> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let stalled = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(
-        `git fetch stalled: the server sent nothing for ${GIT_FETCH_STALL_MS / 1000} seconds`)),
-        GIT_FETCH_STALL_MS);
-  });
+  let stall!: (error: Error) => void;
+  let stalled = new Promise<never>((_, reject) => { stall = reject; });
+  let timer = setTimeout(() => stall(new Error(
+      `git fetch stalled: the server sent nothing for ${GIT_FETCH_STALL_MS / 1000} seconds`)),
+      GIT_FETCH_STALL_MS);
   try {
     return await Promise.race([reader.read(), stalled]);
   } finally {
