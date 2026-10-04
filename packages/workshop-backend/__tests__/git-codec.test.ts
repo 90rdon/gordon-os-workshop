@@ -249,30 +249,46 @@ describe("pack decoding", () => {
     let after = new TextEncoder().encode("the entry after it");
     let pack = concatBytes(await buildPackBytes(
         [{ type: "blob", payload }, { type: "blob", payload: after }]));
+    let oids = [await gitObjectOid("blob", payload), await gitObjectOid("blob", after)];
     for (let step of [undefined, 1000]) {
-      let objects = await decodePack(pack, { step });
-      expect(objects.map(o => o.payload)).toStrictEqual([payload, after]);
+      expect((await decodePack(pack, { step })).map(o => o.oid)).toStrictEqual(oids);
     }
   });
 
-  it("decodes an entry whose stream is longer than zlib would make it", async () => {
-    // Fifty empty stored blocks, then the payload in a final stored block and its Adler-32: a
-    // valid stream several times the length the first attempt allows for.
-    let payload = new TextEncoder().encode("padded out");
+  // A zlib stream holding `payload` in one stored block, after `padding` empty stored blocks:
+  // valid, and as long as the padding makes it.
+  function storedStream(payload: Uint8Array, padding: number): Uint8Array {
     let a = 1, b = 0;
     for (let byte of payload) {
       a = (a + byte) % 65521;
       b = (b + a) % 65521;
     }
-    let pack = await packOfEntry(payload, entry => concatBytes([
-      entry.subarray(0, 1),
+    let empty = new Uint8Array(5 * padding);
+    for (let i = 0; i < empty.length; i += 5) empty.set([0, 0, 0, 0xff, 0xff], i);
+    return concatBytes([
       new Uint8Array([0x78, 0x01]),
-      ...Array.from({ length: 50 }, () => new Uint8Array([0, 0, 0, 0xff, 0xff])),
+      empty,
       new Uint8Array([1, payload.length, 0, ~payload.length & 0xff, 0xff]),
       payload,
       new Uint8Array([b >> 8, b & 0xff, a >> 8, a & 0xff]),
-    ]));
+    ]);
+  }
+
+  it("decodes an entry whose stream is longer than zlib would make it", async () => {
+    let payload = new TextEncoder().encode("padded out");
+    let pack = await packOfEntry(payload,
+        entry => concatBytes([entry.subarray(0, 1), storedStream(payload, 50)]));
     expect((await decodePack(pack))[0].payload).toStrictEqual(payload);
+  });
+
+  it("rejects an entry padded past any deflate of its size", async () => {
+    // Three megabytes of padding around ten bytes. A reader that buffers an entry until its
+    // stream ends is otherwise bounded only by the size of the pack.
+    let payload = new TextEncoder().encode("padded out");
+    let pack = await packOfEntry(payload,
+        entry => concatBytes([entry.subarray(0, 1), storedStream(payload, 600_000)]));
+    await expect(decodePack(pack))
+        .rejects.toThrow(/longer than any deflate of its declared size/);
   });
 
   it("enforces the pack size cap", async () => {

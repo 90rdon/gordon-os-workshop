@@ -473,11 +473,14 @@ class PackReader {
   // header; it was pre-checked against the object-size cap, and bounds the output here, so a
   // lying header cannot cause a larger allocation than it claimed.
   //
-  // inflateSync needs the whole stream in one piece and nothing records its length, so it is
-  // first given as much input as zlib itself could turn `size` bytes into. A stream that runs
-  // past that (another deflater's, or a padded one) is inflated again from twice as much.
+  // inflateSync needs the whole stream in one piece, and nothing records its length. It is first
+  // given as much input as zlib itself could turn `size` bytes into, then as much as any
+  // deflater's worst case: an eighth over, with a read's slack for a small object. A stream
+  // still unfinished there is padding, and the window that would hold more of it is bounded by
+  // nothing but the pack.
   async inflate(size: number): Promise<Uint8Array> {
-    for (let want = size + (size >>> 12) + (size >>> 14) + 13;; want *= 2) {
+    let longest = size + (size >>> 3) + PACK_READ_SIZE;
+    for (let want of [size + (size >>> 12) + (size >>> 14) + 13, longest]) {
       let buffered = await this.#fill(want);
       let input = this.#window.subarray(this.#pos, this.#pos + Math.min(buffered, want));
       let inflated: InflatedEntry;
@@ -509,6 +512,7 @@ class PackReader {
       return buffer.byteLength < buffer.buffer.byteLength
           ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer);
     }
+    throw new Error("invalid packfile: object data longer than any deflate of its declared size");
   }
 
   /** Ends the hashed body at the read position, returning its SHA-1 (hex). */
