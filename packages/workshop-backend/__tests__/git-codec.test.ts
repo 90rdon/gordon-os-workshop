@@ -281,14 +281,14 @@ describe("pack decoding", () => {
     expect((await decodePack(pack))[0].payload).toStrictEqual(payload);
   });
 
-  it("rejects an entry padded past any deflate of its size", async () => {
-    // Three megabytes of padding around ten bytes. A reader that buffers an entry until its
-    // stream ends is otherwise bounded only by the size of the pack.
+  it("refuses an entry with more compressed data than one entry may buffer", async () => {
+    // Three megabytes of empty blocks around ten bytes: a valid stream, but the reader holds an
+    // entry's whole stream, and nothing else would bound that short of the pack's own size.
     let payload = new TextEncoder().encode("padded out");
     let pack = await packOfEntry(payload,
         entry => concatBytes([entry.subarray(0, 1), storedStream(payload, 600_000)]));
-    await expect(decodePack(pack))
-        .rejects.toThrow(/longer than any deflate of its declared size/);
+    await expect(decodePack(pack)).rejects.toThrow(
+        "packfile entry of 10 bytes has more than 65547 bytes of compressed data");
   });
 
   it("enforces the pack size cap", async () => {

@@ -474,13 +474,20 @@ class PackReader {
   // lying header cannot cause a larger allocation than it claimed.
   //
   // inflateSync needs the whole stream in one piece, and nothing records its length. It is first
-  // given as much input as zlib itself could turn `size` bytes into, then as much as any
-  // deflater's worst case: an eighth over, with a read's slack for a small object. A stream
-  // still unfinished there is padding, and the window that would hold more of it is bounded by
-  // nothing but the pack.
+  // given what is already buffered, up to what zlib itself could turn `size` bytes into or one
+  // read's worth if that is less: an entry that has arrived is then decoded without waiting on
+  // the pack behind it. While the stream is unfinished the input grows, to that first amount and
+  // then doubling, up to `longest`: an eighth over `size`, with a read's slack for a small
+  // object.
+  //
+  // `longest` is a limit on memory, not a rule of the format. The window holds an entry's whole
+  // stream, and a stream may be any length for its output (short stored blocks, empty ones), so
+  // without it one entry could buffer as much as the pack cap allows. No deflater git servers
+  // use goes past it, but a valid stream that does is refused.
   async inflate(size: number): Promise<Uint8Array> {
     let longest = size + (size >>> 3) + PACK_READ_SIZE;
-    for (let want of [size + (size >>> 12) + (size >>> 14) + 13, longest]) {
+    let first = Math.min(size + (size >>> 12) + (size >>> 14) + 13, PACK_READ_SIZE);
+    for (let want = Math.min(first, this.#end - this.#pos || first);;) {
       let buffered = await this.#fill(want);
       let input = this.#window.subarray(this.#pos, this.#pos + Math.min(buffered, want));
       let inflated: InflatedEntry;
@@ -491,6 +498,12 @@ class PackReader {
         let code = err instanceof Error && "code" in err ? err.code : undefined;
         if (code === "Z_BUF_ERROR") {
           if (buffered < want) throw new Error("invalid packfile: truncated", { cause: err });
+          if (want === longest) {
+            throw new Error(
+                `packfile entry of ${size} bytes has more than ${longest} bytes of compressed ` +
+                `data, over the limit for one entry`, { cause: err });
+          }
+          want = want < first ? first : Math.min(2 * want, longest);
           continue;
         }
         let detail = err instanceof Error ? err.message : String(err);
@@ -512,7 +525,6 @@ class PackReader {
       return buffer.byteLength < buffer.buffer.byteLength
           ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer);
     }
-    throw new Error("invalid packfile: object data longer than any deflate of its declared size");
   }
 
   /** Ends the hashed body at the read position, returning its SHA-1 (hex). */

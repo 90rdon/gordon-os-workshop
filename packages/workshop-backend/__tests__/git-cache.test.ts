@@ -934,6 +934,32 @@ describe("consumePack", () => {
         .toBe(big.byteLength);
   });
 
+  it("measures an oversized entry that has arrived, though the stream then fails", async () => {
+    // Two megabytes of zeros deflate to a couple of kilobytes, so the whole entry is in the
+    // first read. Decoding it must not wait on as much of the pack again as it inflates to.
+    let t = makeCache();
+    let big = new Uint8Array(2 * MAX_GIT_OBJECT_SIZE);
+    let next = new Uint8Array(200_000);
+    for (let pos = 0; pos < next.length; pos += 50_000) {
+      crypto.getRandomValues(next.subarray(pos, pos + 50_000));
+    }
+    let pack = concatBytes(await buildPackBytes(
+        [{ type: "blob", payload: big }, { type: "blob", payload: next }]));
+    let sent = false;
+    let failing = new ReadableStream<Uint8Array>({
+      type: "bytes",
+      pull(controller) {
+        if (sent) controller.error(new Error("connection lost"));
+        else controller.enqueue(pack.slice(0, 64 << 10));
+        sent = true;
+      },
+    });
+    await expect(new GitCacheImpl(t.cache, G1).consumePack(failing))
+        .rejects.toThrow("connection lost");
+    expect(t.storage.gitObjectMetadata.get(await gitObjectOid("blob", big))?.size)
+        .toBe(big.byteLength);
+  });
+
   it("resolves a delta against an oversized base it declines to store", async () => {
     // How git packs a file similar to a large one (e.g. a second lockfile in a whole-tree blob
     // pull), hand-built: the large blob, then a ref-delta copying its first 16 bytes.
