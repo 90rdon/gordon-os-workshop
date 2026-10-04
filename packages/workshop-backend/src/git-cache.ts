@@ -255,18 +255,19 @@ export class WorkspaceGitCache {
    * absent from the returned list, which is how a gitPull implementation notices). Returns the
    * stored oids.
    *
-   * The pack streams through. Small blobs, the bulk of a checkout, are stored as they arrive.
-   * An oversized object is measured as it arrives, so a pull that is cut short still leaves the
-   * size for later reads to fail fast on, and is then kept to the end, as a later delta may name
-   * it as its base. Commits, trees and tags are held until the whole pack has verified, then
-   * stored, one object per transaction, with commits last: a commit's local presence is what
-   * lets `fetchCommit` mount it and skip ever pulling it again, so no commit is stored before
-   * every other held object is. A store that throws rolls back only its own object, so a
-   * failure partway can leave verified trees, the root tree included, with no commit: nothing
-   * treats those as mounted, and lazy reads fault around them. No await separates these stores,
-   * so they still reach disk together; one transaction around them all would also undo the
-   * earlier objects when a later one throws, but in production it nearly doubled a vscode-size
-   * mount's CPU.
+   * The pack streams through. Small blobs, the bulk of a checkout, are stored as they arrive,
+   * with no transaction around each: what can fail partway through a store is parsing the
+   * objects it names, and a blob names none. An oversized object is measured as it arrives, so
+   * a pull that is cut short still leaves the size for later reads to fail fast on, and is then
+   * kept to the end, as a later delta may name it as its base. Commits, trees and tags are held
+   * until the whole pack has verified, then stored, one object per transaction, with commits
+   * last: a commit's local presence is what lets `fetchCommit` mount it and skip ever pulling it
+   * again, so no commit is stored before every other held object is. A store that throws rolls
+   * back only its own object, so a failure partway can leave verified trees, the root tree
+   * included, with no commit: nothing treats those as mounted, and lazy reads fault around
+   * them. No await separates these stores, so they still reach disk together; one transaction
+   * around them all would also undo the earlier objects when a later one throws, but in
+   * production it nearly doubled a vscode-size mount's CPU.
    */
   async consumePackFromGatekeeper(gatekeeperId: WorkpieceId, pack: ReadableStream<Uint8Array>)
       : Promise<GitOid[]> {
@@ -281,8 +282,7 @@ export class WorkspaceGitCache {
     for await (let { oid, ...object } of objects) {
       if (object.type !== "blob" && object.payload.byteLength <= MAX_GIT_OBJECT_SIZE) {
         held.set(oid, object);
-      } else if (this.storage.transaction(
-          () => this.#storeVerifiedObject(gatekeeperId, oid, object))) {
+      } else if (this.#storeVerifiedObject(gatekeeperId, oid, object)) {
         stored.push(oid);
       } else {
         oversized.set(oid, object);
@@ -1184,7 +1184,8 @@ export class WorkspaceGitCache {
     this.storage.gitObjectMetadata.put(meta);
   }
 
-  // The shared put()-equivalent store step (callers wrap in a transaction): an object over
+  // The shared put()-equivalent store step (callers wrap it in a transaction, unless the object
+  // is a blob or oversized, which leaves nothing to parse after the first write): an object over
   // MAX_GIT_OBJECT_SIZE is only measured, returning false. Anything else is stored, with proof of
   // possession and referent pull-routing rows recorded and pending-push marks propagated to the
   // referents now that they are visible. An object this gatekeeper already stored is left alone:
