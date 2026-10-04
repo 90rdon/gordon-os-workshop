@@ -304,6 +304,20 @@ describe("demuxGitFetchResponse", () => {
       .rejects.toThrow(/no packfile section/);
   });
 
+  it("gives up on a response that is mostly not pack data", async () => {
+    // The overseer limits the pack it is sent, but it never sees progress, framing or
+    // keepalives, and each of those that arrives also holds off the stall timeout.
+    const progress = new Uint8Array(60_000);
+    const response = [
+      encodePktLine("packfile"),
+      sidebandPkt(1, PACK_BYTES),
+      ...Array.from({ length: 20 }, () => sidebandPkt(2, progress)),
+      FLUSH_PKT,
+    ];
+    await expect(collect(demuxGitFetchResponse(streamOf(response))))
+      .rejects.toThrow(/bytes that are not pack data/);
+  });
+
   it("ends the fetch when its reader cancels", async () => {
     // How a pack over the overseer's cap stops downloading: consumePack() rejects it and
     // cancels the stream it was reading.

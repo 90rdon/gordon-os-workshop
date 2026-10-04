@@ -30,6 +30,15 @@
 import type { GitOid, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 
 /**
+ * How much of a fetch response may be something other than pack data (packet framing, the
+ * sections before the pack, progress, keepalives) before the fetch is given up: this much, plus
+ * a sixteenth of the pack data delivered so far. The overseer bounds the pack, but it never sees
+ * these bytes, and each one that arrives also holds off the stall timeout. git's own framing is
+ * five bytes on a packet of eight thousand or more.
+ */
+export const MAX_GIT_FETCH_OVERHEAD_BYTES = 1 << 20;
+
+/**
  * How long the server may send nothing, while a pull is waiting on it, before the fetch is given
  * up as stalled. Time between reads does not count: the overseer stores the pack as it streams
  * and reads at that pace, so a fetch has no fixed duration to hold it to.
@@ -269,9 +278,10 @@ const BAND_ERROR = 3;
  * `onFailure` is told what the stream failed with, which a reader on the far side of an RPC hop
  * does not learn.
  *
- * Nothing here limits the size of the body. The pack is the overseer's to limit: `consumePack()`
- * rejects one over its cap and cancels this stream, which ends the fetch. The gatekeeper holds
- * none of it either way.
+ * The pack's size is the overseer's to limit: `consumePack()` rejects one over its cap and
+ * cancels this stream, which ends the fetch. What is limited here is the rest of the response,
+ * which the overseer never sees (see MAX_GIT_FETCH_OVERHEAD_BYTES). The gatekeeper holds none
+ * of the body either way.
  */
 export function demuxGitFetchResponse(
   body: ReadableStream<Uint8Array>,
@@ -303,6 +313,8 @@ async function* demuxPackData(
   try {
     let parser = new PktLineParser();
     let inPackfile = false;
+    let received = 0;
+    let delivered = 0;
     while (true) {
       let result = await readOrStall(reader);
       if (result.done) {
@@ -311,6 +323,7 @@ async function* demuxPackData(
             ? "truncated git fetch response: missing final flush"
             : "git fetch response contained no packfile section");
       }
+      received += result.value.byteLength;
       for (let item of parser.push(result.value)) {
         if (item.kind === "delim" || item.kind === "response-end") continue;
         if (item.kind === "flush") {
@@ -333,12 +346,18 @@ async function* demuxPackData(
         let band = item.data[0];
         let payload = item.data.subarray(1);
         if (band === BAND_PACK) {
+          delivered += payload.byteLength;
           if (payload.byteLength > 0) yield payload;
         } else if (band === BAND_ERROR) {
           throw new Error(`git fetch failed: ${pktText(payload)}`);
         } else if (band !== BAND_PROGRESS) {
           throw new Error(`malformed sideband frame: unknown band ${band}`);
         }
+      }
+      if (received - delivered > MAX_GIT_FETCH_OVERHEAD_BYTES + delivered / 16) {
+        throw new Error(
+            `git fetch response carried ${received - delivered} bytes that are not pack data, ` +
+            `with ${delivered} bytes that are`);
       }
     }
   } finally {
