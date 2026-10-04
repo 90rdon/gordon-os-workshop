@@ -257,10 +257,14 @@ export class WorkspaceGitCache {
    *
    * The pack streams through: small blobs, the bulk of a checkout, are stored as they arrive.
    * Everything else -- oversized blobs included, as a later delta may name one as its base -- is
-   * held until the whole pack has verified and then stored in one transaction, because a commit's
-   * local presence is what lets `fetchCommit` mount it and skip ever pulling it again: a failed
-   * pack must not leave a commit whose trees never arrived. The blobs it can leave are verified
-   * leaves that only a tree makes reachable.
+   * held until the whole pack has verified, then stored the same way, one object per
+   * transaction, with commits last: a commit's local presence is what lets `fetchCommit` mount
+   * it and skip ever pulling it again, so no commit is stored before every other held object is.
+   * A store that throws rolls back only its own object, so a failure partway can leave verified
+   * trees, the root tree included, with no commit: nothing treats those as mounted, and lazy
+   * reads fault around them. No await separates these stores, so they still reach disk
+   * together; one transaction around them all would also undo the earlier objects when a later
+   * one throws, but in production it nearly doubled a vscode-size mount's CPU.
    */
   async consumePackFromGatekeeper(gatekeeperId: WorkpieceId, pack: ReadableStream<Uint8Array>)
       : Promise<GitOid[]> {
@@ -279,11 +283,13 @@ export class WorkspaceGitCache {
         held.set(oid, object);
       }
     }
-    this.storage.transaction(() => {
-      for (let [oid, object] of held) {
-        if (this.#storeVerifiedObject(gatekeeperId, oid, object)) stored.push(oid);
+    let commitsLast = [...held].toSorted(([, a], [, b]) =>
+        Number(a.type === "commit") - Number(b.type === "commit"));
+    for (let [oid, object] of commitsLast) {
+      if (this.storage.transaction(() => this.#storeVerifiedObject(gatekeeperId, oid, object))) {
+        stored.push(oid);
       }
-    });
+    }
     return stored;
   }
 

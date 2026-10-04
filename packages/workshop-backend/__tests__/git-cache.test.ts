@@ -814,6 +814,19 @@ describe("consumePack", () => {
     }
   });
 
+  it("stores no commit when one of its trees fails to store", async () => {
+    // Git only reports mode 100664 as informational, so real histories carry it, but the cache
+    // refuses it. The commit comes first, as in the packs git sends.
+    let t = makeCache();
+    let tree = treePayload([{ mode: "100664", name: "a.txt", oid: "a".repeat(40) }]);
+    let commit = commitPayload(await gitObjectOid("tree", tree), [], "bad mode\n");
+    let pack = concatBytes(await buildPackBytes(
+        [{ type: "commit", payload: commit }, { type: "tree", payload: tree }]));
+    await expect(new GitCacheImpl(t.cache, G1).consumePack(byteStream(pack)))
+        .rejects.toThrow(/corrupt tree object/);
+    expect(t.cache.hasLocalObject(await gitObjectOid("commit", commit))).toBe(false);
+  });
+
   it("measures an oversized entry, skips storing it, and omits it from the result", async () => {
     let t = makeCache();
     let big = new Uint8Array(MAX_GIT_OBJECT_SIZE + 5).fill(0x7a);
