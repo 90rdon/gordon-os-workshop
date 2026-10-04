@@ -1369,30 +1369,41 @@ export class GitHubApi {
    */
   async fetchGitUploadPack(owner: string, repo: string, requestBody: Uint8Array): Promise<Response> {
     const url = `${LOGIN_BASE_URL}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/git-upload-pack`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        Accept: "application/x-git-upload-pack-result",
-        "Git-Protocol": "version=2",
-        "User-Agent": USER_AGENT,
-        Authorization: `Basic ${encodeBasicAuth("x-access-token", await this.#getToken())}`,
-      },
-      body: requestBody,
-      // Longer than REQUEST_TIMEOUT_MS: the signal also covers streaming the response body,
-      // which may be a pack of tens of megabytes.
-      signal: AbortSignal.timeout(GIT_UPLOAD_PACK_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      // The error body is short prose (e.g. "Repository not found"); a truncated copy makes the
-      // failure actionable without trusting its size.
-      const detail = (await response.text().catch(() => "")).trim().slice(0, 200);
-      throw new GitHubApiError(
-        response.status,
-        `git fetch failed: ${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`,
-      );
+    // The timeout covers the wait for the response, and an error body, but not the pack. That
+    // streams on to the overseer, which reads it only as fast as it stores it, so no fixed
+    // budget fits; git-transport.ts gives the fetch up if the server goes quiet instead.
+    const token = await this.#getToken();
+    const waiting = new AbortController();
+    const timer = setTimeout(
+      () => waiting.abort(new DOMException("The operation timed out.", "TimeoutError")),
+      GIT_UPLOAD_PACK_TIMEOUT_MS,
+    );
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          Accept: "application/x-git-upload-pack-result",
+          "Git-Protocol": "version=2",
+          "User-Agent": USER_AGENT,
+          Authorization: `Basic ${encodeBasicAuth("x-access-token", token)}`,
+        },
+        body: requestBody,
+        signal: waiting.signal,
+      });
+      if (!response.ok) {
+        // The error body is short prose (e.g. "Repository not found"); a truncated copy makes
+        // the failure actionable without trusting its size.
+        const detail = (await response.text().catch(() => "")).trim().slice(0, 200);
+        throw new GitHubApiError(
+          response.status,
+          `git fetch failed: ${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`,
+        );
+      }
+      return response;
+    } finally {
+      clearTimeout(timer);
     }
-    return response;
   }
 
   /**

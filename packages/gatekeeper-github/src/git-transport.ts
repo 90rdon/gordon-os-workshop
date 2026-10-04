@@ -37,6 +37,13 @@ import type { GitOid, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
  */
 export const MAX_GIT_FETCH_BYTES = 256 << 20;
 
+/**
+ * How long the server may send nothing, while a pull is waiting on it, before the fetch is given
+ * up as stalled. Time between reads does not count: the overseer stores the pack as it streams
+ * and reads at that pace, so a fetch has no fixed duration to hold it to.
+ */
+export const GIT_FETCH_STALL_MS = 60_000;
+
 /** The `agent` capability sent with every request, mirroring the REST layer's User-Agent. */
 const GIT_AGENT = "cloudflare-gadgets";
 
@@ -304,7 +311,7 @@ async function* demuxPackData(
     let received = 0;
     let inPackfile = false;
     while (true) {
-      let result = await reader.read();
+      let result = await readOrStall(reader);
       if (result.done) {
         parser.finish();
         throw new Error(inPackfile
@@ -348,6 +355,22 @@ async function* demuxPackData(
     }
   } finally {
     await reader.cancel().catch(() => {});
+  }
+}
+
+// Reads the next chunk of a fetch body, failing if none arrives within GIT_FETCH_STALL_MS.
+async function readOrStall(reader: ReadableStreamDefaultReader<Uint8Array>)
+    : Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stalled = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(
+        `git fetch stalled: the server sent nothing for ${GIT_FETCH_STALL_MS / 1000} seconds`)),
+        GIT_FETCH_STALL_MS);
+  });
+  try {
+    return await Promise.race([reader.read(), stalled]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

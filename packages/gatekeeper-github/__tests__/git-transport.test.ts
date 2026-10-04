@@ -7,10 +7,11 @@
 // canonical empty pack, report-status parsing, and the push driver's body composition.
 
 import type { GitOid, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DELIM_PKT,
   FLUSH_PKT,
+  GIT_FETCH_STALL_MS,
   GitRefUpdateRejectedError,
   MAX_GIT_FETCH_BYTES,
   PktLineParser,
@@ -309,6 +310,44 @@ describe("demuxGitFetchResponse", () => {
     const limit = concatBytes(response).byteLength - 1;
     await expect(collect(demuxGitFetchResponse(streamOf(response), limit)))
       .rejects.toThrow(/transfer limit/);
+  });
+
+  it("gives the fetch up when the server goes quiet", async () => {
+    vi.useFakeTimers();
+    try {
+      // A body that opens the packfile section and then neither sends nor ends.
+      let opened = false;
+      const quiet = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (opened) return new Promise(() => {});
+          opened = true;
+          controller.enqueue(encodePktLine("packfile"));
+        },
+      });
+      const outcome = expect(collect(demuxGitFetchResponse(quiet, MAX_GIT_FETCH_BYTES)))
+        .rejects.toThrow("git fetch stalled: the server sent nothing for 60 seconds");
+      await vi.advanceTimersByTimeAsync(GIT_FETCH_STALL_MS);
+      await outcome;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not count the time its reader takes between reads", async () => {
+    // The overseer reads the pack only as fast as it stores it.
+    vi.useFakeTimers();
+    try {
+      const reader =
+          demuxGitFetchResponse(streamOf(packfileResponse()), MAX_GIT_FETCH_BYTES).getReader();
+      const chunks = [(await reader.read()).value!];
+      await vi.advanceTimersByTimeAsync(10 * GIT_FETCH_STALL_MS);
+      for (let next = await reader.read(); !next.done; next = await reader.read()) {
+        chunks.push(next.value);
+      }
+      expect(concatBytes(chunks)).toEqual(PACK_BYTES);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
