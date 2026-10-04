@@ -31,10 +31,11 @@ import type { GitOid, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 
 /**
  * Maximum raw HTTP body size accepted from one upload-pack fetch, enforced while streaming (the
- * transfer-size limiter pattern from gatekeeper-context's artifact-sync, same 64MB budget --
- * also matching the cap the overseer's `consumePack()` applies to the pack itself).
+ * transfer-size limiter pattern from gatekeeper-context's artifact-sync), matching the cap the
+ * overseer's `consumePack()` applies to the pack itself. Nothing here holds the body in memory:
+ * it streams through to the overseer, so the limit bounds the work of one pull.
  */
-export const MAX_GIT_FETCH_BYTES = 64 << 20;
+export const MAX_GIT_FETCH_BYTES = 256 << 20;
 
 /** The `agent` capability sent with every request, mirroring the REST layer's User-Agent. */
 const GIT_AGENT = "cloudflare-gadgets";
