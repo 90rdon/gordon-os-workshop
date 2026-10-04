@@ -95,6 +95,7 @@ export default defineConfig({
           // which the overseer instantiates it (with props) as one of its own facets.
           TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
           TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
+          TEST_SPACE: { className: 'SpaceDurableObject', useSQLite: true },
         },
       },
     }),
