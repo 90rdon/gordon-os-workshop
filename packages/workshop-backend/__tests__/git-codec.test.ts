@@ -255,6 +255,44 @@ describe("pack decoding", () => {
     }
   });
 
+  it("decodes an entry large enough to be inflated a read at a time", async () => {
+    // Over a megabyte the reader stops holding an entry's whole stream. Random bytes make that
+    // stream as long as the object, some fifty reads.
+    let payload = new Uint8Array(3 << 20);
+    for (let pos = 0; pos < payload.length; pos += 65536) {
+      crypto.getRandomValues(payload.subarray(pos, pos + 65536));
+    }
+    let after = new TextEncoder().encode("the entry after it");
+    let pack = concatBytes(await buildPackBytes(
+        [{ type: "blob", payload }, { type: "blob", payload: after }]));
+    let oids = [await gitObjectOid("blob", payload), await gitObjectOid("blob", after)];
+    for (let step of [undefined, 1000]) {
+      expect((await decodePack(pack, { step })).map(o => o.oid)).toStrictEqual(oids);
+    }
+  });
+
+  it("rejects a large entry whose data is not the size it declares", async () => {
+    // The same check as for a small entry, on the path that inflates a read at a time.
+    let payload = new Uint8Array((1 << 20) + 10).fill(7);
+    let header = (size: number) => {
+      let bytes = [];
+      let first = (3 << 4) | (size & 0x0f);
+      for (let rest = size >>> 4; rest > 0; rest >>>= 7) {
+        bytes.push(first | 0x80);
+        first = rest & 0x7f;
+      }
+      return new Uint8Array([...bytes, first]);
+    };
+    let declaring = (size: number) => packOfEntry(payload, entry => concatBytes(
+        [header(size), entry.subarray(header(payload.length).length)]));
+    await expect(decodePack(await declaring(payload.length - 1)))
+        .rejects.toThrow(/larger than its declared/);
+    await expect(decodePack(await declaring(payload.length + 1)))
+        .rejects.toThrow(/smaller than its declared/);
+    expect((await decodePack(await declaring(payload.length)))[0].oid)
+        .toBe(await gitObjectOid("blob", payload));
+  });
+
   // A zlib stream holding `payload` in one stored block, after `padding` empty stored blocks:
   // valid, and as long as the padding makes it.
   function storedStream(payload: Uint8Array, padding: number): Uint8Array {

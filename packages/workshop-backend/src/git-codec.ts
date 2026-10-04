@@ -17,11 +17,13 @@
 // use workerd's native node:zlib: pako's deflate takes about twice the CPU of the native one, and
 // its inflate allocates some 100 KiB per stream. Pack entries are concatenated zlib streams with
 // no recorded lengths, so the decoder has to learn where each one ends -- inflateSync reports the
-// input it consumed when asked for `info`, which DecompressionStream cannot do. Only writing a
-// pack (buildPackBytes, the push path) still uses pako, the library isomorphic-git bundles.
+// input it consumed when asked for `info`, which DecompressionStream cannot do. It needs the
+// whole stream at once, though, so an entry too large to hold that way is inflated a read at a
+// time with pako (the library isomorphic-git bundles), which also writes packs (buildPackBytes,
+// the push path).
 
 import { constants, deflateSync, inflateSync } from "node:zlib";
-import { deflate } from "pako";
+import { Inflate, deflate } from "pako";
 import type { GitObjectType, GitOid } from "@gadgets/workshop-shared/gatekeeper";
 
 const ENCODER = new TextEncoder();
@@ -421,7 +423,26 @@ interface InflatedEntry {
   engine: { bytesWritten: number };
 }
 
+// The pako Inflate internals the streamed path relies on beyond @types/pako's declarations, all
+// stable pako API in practice (isomorphic-git's own pack parser relies on `strm.avail_in` the
+// same way): `ended` flips when the zlib stream completes mid-input, and `strm.avail_in` is how
+// many bytes of the last push() the stream did not consume -- together they locate the entry
+// boundary.
+interface InflateWithInternals {
+  ended: boolean;
+  err: number;
+  msg: string;
+  strm: { avail_in: number };
+  onData: (chunk: Uint8Array) => void;
+  push(data: Uint8Array, flush: boolean): void;
+}
+
 const PACK_READ_SIZE = 64 << 10;
+
+// Entries declaring more than this are inflated a read at a time. Native inflate holds an entry's
+// whole compressed stream beside its output and a second copy of that output while it joins it:
+// three times the object, which for one of tens of megabytes is more than the Overseer has.
+const PACK_STREAMED_ENTRY_SIZE = 1 << 20;
 
 // decodePackStream's reads, in order, from a window over the bytes that have arrived and are not
 // yet consumed, hashing every byte before `endBody()` (the trailer's SHA-1 input) as it leaves
@@ -485,6 +506,7 @@ class PackReader {
   // without it one entry could buffer as much as the pack cap allows. No deflater git servers
   // use goes past it, but a valid stream that does is refused.
   async inflate(size: number): Promise<Uint8Array> {
+    if (size > PACK_STREAMED_ENTRY_SIZE) return this.#inflateStreamed(size);
     let longest = size + (size >>> 3) + PACK_READ_SIZE;
     let first = Math.min(size + (size >>> 12) + (size >>> 14) + 13, PACK_READ_SIZE);
     for (let want = Math.min(first, this.#end - this.#pos || first);;) {
@@ -525,6 +547,47 @@ class PackReader {
       return buffer.byteLength < buffer.buffer.byteLength
           ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer);
     }
+  }
+
+  // Inflates a large entry a read at a time, into a buffer of the size it declares. No input is
+  // kept beyond the read in hand, so the stream may be any length for its output, and the output
+  // is written once.
+  async #inflateStreamed(size: number): Promise<Uint8Array> {
+    let inflator = new Inflate({ windowBits: 15 }) as unknown as InflateWithInternals;
+    let out = new Uint8Array(size);
+    let total = 0;
+    let overflow = false;
+    inflator.onData = (chunk: Uint8Array) => {
+      if (total + chunk.byteLength > size) {
+        overflow = true;
+        // pako offers no abort; raising here unwinds through push() below.
+        throw new Error("pack entry exceeds declared size");
+      }
+      out.set(chunk, total);
+      total += chunk.byteLength;
+    };
+
+    try {
+      while (!inflator.ended) {
+        if (await this.#fill(1) === 0) throw new Error("invalid packfile: truncated");
+        inflator.push(this.#window.subarray(this.#pos, this.#end), false);
+        if (inflator.err) {
+          throw new Error(
+              `invalid packfile: corrupt object data (${inflator.msg || inflator.err})`);
+        }
+        this.#pos = this.#end - inflator.strm.avail_in;
+      }
+    } catch (err) {
+      if (overflow) {
+        throw new Error("invalid packfile: object larger than its declared size", { cause: err });
+      }
+      throw err;
+    }
+
+    if (total !== size) {
+      throw new Error("invalid packfile: object smaller than its declared size");
+    }
+    return out;
   }
 
   /** Ends the hashed body at the read position, returning its SHA-1 (hex). */
