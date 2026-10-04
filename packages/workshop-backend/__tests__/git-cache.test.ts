@@ -954,9 +954,9 @@ describe("consumePack", () => {
     })();
   }
 
-  // A pack of any `leading` objects, the two big blobs, and a ref-delta copying the first 16
-  // bytes of one of them (the `target`).
-  async function packOfTwoBigBlobs(deltaOn: 0 | 1, leading: PackableObject[] = []) {
+  // A pack of the two big blobs, a ref-delta copying the first 16 bytes of one of them (the
+  // `target`), and then any `trailing` objects.
+  async function packOfTwoBigBlobs(deltaOn: 0 | 1, trailing: PackableObject[] = []) {
     let { bigs, oids, entries } = await bigBlobs();
     let size = bigs[0].byteLength;
     // Delta: the base size as a varint, target size 16, then a 16-byte copy from offset 0.
@@ -965,40 +965,46 @@ describe("consumePack", () => {
       delta.push(rest > 0x7f ? rest & 0x7f | 0x80 : rest);
     }
     delta.push(16, 0x90, 16);
+    let after = concatBytes(await buildPackBytes(trailing));
     let body = concatBytes([
-      concatBytes(await buildPackBytes(leading)).slice(0, -20),
+      after.subarray(0, 12),
       entries,
       new Uint8Array([(7 << 4) | delta.length]),
       Uint8Array.from(oids[deltaOn].match(/../g)!, h => parseInt(h, 16)),
       deflate(new Uint8Array(delta)),
+      after.subarray(12, -20),
     ]);
-    new DataView(body.buffer).setUint32(8, leading.length + 3);
+    new DataView(body.buffer).setUint32(8, trailing.length + 3);
     let pack = concatBytes([body, new Uint8Array(await crypto.subtle.digest("SHA-1", body))]);
     let target = bigs[deltaOn].subarray(0, 16);
     return { pack, oids, size, target, targetOid: await gitObjectOid("blob", target) };
   }
 
-  it("lets the oldest oversized base go from a pack of blobs past the budget", async () => {
+  it("lets go of the oldest oversized base the pull asked for, past the budget", async () => {
     // Only the second blob is still on hand by the time a delta names a base.
     let recent = await packOfTwoBigBlobs(1);
-    expect(await new GitCacheImpl(makeCache().cache, G1).consumePack(byteStream(recent.pack)))
+    let consume = (t: TestCache, pack: Uint8Array, asked: GitOid[]) =>
+        new GitCacheImpl(t.cache, G1, undefined, asked).consumePack(byteStream(pack));
+    expect(await consume(makeCache(), recent.pack, recent.oids))
         .toStrictEqual([recent.targetOid]);
 
     let t = makeCache();
     let dropped = await packOfTwoBigBlobs(0);
-    await expect(new GitCacheImpl(t.cache, G1).consumePack(byteStream(dropped.pack)))
+    await expect(consume(t, dropped.pack, dropped.oids))
         .rejects.toThrow(`delta base ${dropped.oids[0]} is unavailable`);
     expect(t.storage.gitObjectMetadata.get(dropped.oids[0])?.size).toBe(dropped.size);
   });
 
-  it("keeps every oversized base in a pack that carries a commit", async () => {
-    // Such a pack answers a want for the commit and would be sent again unchanged, so failing
-    // it on a dropped base would fail the mount for good.
+  it("keeps an oversized base the pull did not ask for, wherever the commit comes", async () => {
+    // A mount asks for a commit and would be sent this pack again unchanged, so failing it on
+    // a dropped base would fail the mount for good. Here the blobs even precede the commit.
     let t = makeCache();
     let commit = commitPayload(await gitObjectOid("tree", new Uint8Array(0)), [], "big files\n");
+    let commitOid = await gitObjectOid("commit", commit);
     let { pack, targetOid } = await packOfTwoBigBlobs(0, [{ type: "commit", payload: commit }]);
-    let stored = await new GitCacheImpl(t.cache, G1).consumePack(byteStream(pack));
-    expect(stored).toStrictEqual([targetOid, await gitObjectOid("commit", commit)]);
+    let stored = await new GitCacheImpl(t.cache, G1, undefined, [commitOid])
+        .consumePack(byteStream(pack));
+    expect(stored).toStrictEqual([targetOid, commitOid]);
   });
 
   it("reads a batch of blobs whose pack failed on a dropped base", async () => {
@@ -1012,7 +1018,7 @@ describe("consumePack", () => {
     t.sources.set(G1, async asked => {
       let answer = asked.includes(oids[0]) ? pack
           : concatBytes(await buildPackBytes([{ type: "blob", payload: target }]));
-      await t.cache.consumePackFromGatekeeper(G1, byteStream(answer));
+      await t.cache.consumePackFromGatekeeper(G1, byteStream(answer), asked);
     });
     expect(await t.cache.ensureBlobs(wanted)).toStrictEqual(new Set(oids));
     expect(t.cache.readLocalObject(targetOid)?.payload).toStrictEqual(target);

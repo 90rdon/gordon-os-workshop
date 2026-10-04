@@ -4261,7 +4261,9 @@ class OverseerImpl implements AgentHooks {
     // call, which the pull driver treats as this source failing.
     let facet = this.getGatekeeperFacet(gatekeeperId) as unknown as
         Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "gitPull">>>;
-    await facet.gitPull(oids, new GitCacheImpl(this.gitCache, gatekeeperId), hints);
+    // The stub knows what this pull asks for: see consumePackFromGatekeeper on oversized bases.
+    await facet.gitPull(
+        oids, new GitCacheImpl(this.gitCache, gatekeeperId, undefined, oids), hints);
   }
 
   // Apply a single pending action: invoke the gatekeeper, mark it approved, and persist (the put

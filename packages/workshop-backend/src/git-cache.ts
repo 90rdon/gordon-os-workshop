@@ -87,9 +87,10 @@ export const MAX_GIT_OBJECT_SIZE = 1 << 20;
 export const MAX_GIT_PACK_BYTES = 64 << 20;
 
 /**
- * How many bytes of oversized blobs `consumePack()` keeps at once, from a pack of blobs alone,
- * as bases a later delta may name. They are never stored, and a blob fetch can carry any number
- * of them inflated, which the pack's own size cap does not bound.
+ * How many bytes of oversized objects `consumePack()` keeps at once as bases a later delta may
+ * name, before it lets go of those the pull asked for by name. They are never stored, and a
+ * blob fetch can carry any number of them inflated, which the pack's own size cap does not
+ * bound.
  */
 export const MAX_OVERSIZED_BASE_BYTES = 32 << 20;
 
@@ -266,26 +267,28 @@ export class WorkspaceGitCache {
    * with no transaction around each: what can fail partway through a store is parsing the
    * objects it names, and a blob names none. An oversized object is measured as it arrives, so
    * a pull that is cut short still leaves the size for later reads to fail fast on, and is then
-   * kept as a base a later delta may name. A pack of blobs alone lets them go, oldest first,
-   * once they pass MAX_OVERSIZED_BASE_BYTES: it answers a request that named each blob, so
-   * when a delta does name one let go and the pack fails, the sizes already recorded keep them
-   * out of the next request (see ensureGitObjects). A pack with a commit, tree or tag in it
-   * would be sent again unchanged, so it keeps every base. Commits, trees and tags are held
-   * until the whole pack has verified, then stored, one object per transaction, with commits
-   * last: a commit's local presence is what lets `fetchCommit` mount it and skip ever pulling it
-   * again, so no commit is stored before every other held object is. A store that throws rolls
-   * back only its own object, so a failure partway can leave verified trees, the root tree
-   * included, with no commit: nothing treats those as mounted, and lazy reads fault around
-   * them. No await separates these stores, so they still reach disk together; one transaction
-   * around them all would also undo the earlier objects when a later one throws, but in
-   * production it nearly doubled a vscode-size mount's CPU.
+   * kept as a base a later delta may name. Past MAX_OVERSIZED_BASE_BYTES of them, those the
+   * pull asked for by name (`asked`, from the stub `gitPull()` was handed) are let go, oldest
+   * first. Such a pull can only end in GitObjectTooLargeError for that object, and once
+   * measured it is left out of the next request, so a pack that fails because a delta named it
+   * is not the pack the retry gets (see ensureGitObjects). An object the pull did not ask for
+   * -- whatever a commit's traversal brought -- would arrive again in the same pack, so it is
+   * kept. Commits, trees and tags are held until the whole pack has verified, then stored, one
+   * object per transaction, with commits last: a commit's local presence is what lets
+   * `fetchCommit` mount it and skip ever pulling it again, so no commit is stored before every
+   * other held object is. A store that throws rolls back only its own object, so a failure
+   * partway can leave verified trees, the root tree included, with no commit: nothing treats
+   * those as mounted, and lazy reads fault around them. No await separates these stores, so
+   * they still reach disk together; one transaction around them all would also undo the
+   * earlier objects when a later one throws, but in production it nearly doubled a vscode-size
+   * mount's CPU.
    */
-  async consumePackFromGatekeeper(gatekeeperId: WorkpieceId, pack: ReadableStream<Uint8Array>)
-      : Promise<GitOid[]> {
+  async consumePackFromGatekeeper(gatekeeperId: WorkpieceId, pack: ReadableStream<Uint8Array>,
+                                  asked: readonly GitOid[] = []): Promise<GitOid[]> {
     let held = new Map<GitOid, PackableObject>();
     let oversized = new Map<GitOid, PackableObject>();
     let oversizedBytes = 0;
-    let blobsOnly = true;
+    let droppable = new Set(asked);
     let stored: GitOid[] = [];
     let objects = decodePackStream(pack, {
       maxPackSize: MAX_GIT_PACK_BYTES,
@@ -293,7 +296,6 @@ export class WorkspaceGitCache {
       resolveBase: oid => held.get(oid) ?? oversized.get(oid) ?? this.readLocalObject(oid),
     });
     for await (let { oid, ...object } of objects) {
-      blobsOnly &&= object.type === "blob";
       if (object.type !== "blob" && object.payload.byteLength <= MAX_GIT_OBJECT_SIZE) {
         held.set(oid, object);
       } else if (this.#storeVerifiedObject(gatekeeperId, oid, object)) {
@@ -301,9 +303,10 @@ export class WorkspaceGitCache {
       } else if (!oversized.has(oid)) {
         oversized.set(oid, object);
         oversizedBytes += object.payload.byteLength;
-        // Oldest out first, and never the one just added.
+        // Oldest out first: never the one just added, nor one the pull did not ask for.
         for (let [oldest, { payload }] of oversized) {
-          if (!blobsOnly || oversizedBytes <= MAX_OVERSIZED_BASE_BYTES || oldest === oid) break;
+          if (oversizedBytes <= MAX_OVERSIZED_BASE_BYTES || oldest === oid) break;
+          if (!droppable.has(oldest)) continue;
           oversized.delete(oldest);
           oversizedBytes -= payload.byteLength;
         }
@@ -1249,12 +1252,14 @@ export class WorkspaceGitCache {
  * (put/advertise record this gatekeeper as the source) and the read view. The overseer
  * additionally binds the stub passed to `applyAction()` to the applying action, which is what
  * makes `buildPack()` available; session-scoped stubs (from
- * `ObservationAuthorizer.getGitCache()`) have no action and `buildPack()` throws.
+ * `ObservationAuthorizer.getGitCache()`) have no action and `buildPack()` throws. The stub
+ * passed to `gitPull()` carries the oids that pull asked for, which `consumePack()` needs to
+ * bound what it keeps in memory.
  */
 @validateRpc()
 export class GitCacheImpl extends RpcTarget implements GitCache {
   constructor(private cache: WorkspaceGitCache, private gatekeeperId: WorkpieceId,
-              private actionId?: number) {
+              private actionId?: number, private pulling: readonly GitOid[] = []) {
     super();
   }
 
@@ -1291,7 +1296,7 @@ export class GitCacheImpl extends RpcTarget implements GitCache {
   }
 
   async consumePack(pack: ReadableStream<Uint8Array>): Promise<GitOid[]> {
-    return this.cache.consumePackFromGatekeeper(this.gatekeeperId, pack);
+    return this.cache.consumePackFromGatekeeper(this.gatekeeperId, pack, this.pulling);
   }
 
   async isAncestor(ancestor: GitOid, descendant: GitOid): Promise<boolean> {
