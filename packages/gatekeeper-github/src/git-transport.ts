@@ -266,16 +266,24 @@ const BAND_ERROR = 3;
  * discarded, band 3 = fatal server error). An `ERR` pkt or band-3 message fails the stream with
  * the server's message; `maxBytes` bounds the raw body (see MAX_GIT_FETCH_BYTES); a response
  * that ends without a flush-pkt, or without ever reaching a packfile section, is an error --
- * a truncated pack must never look like a short success.
+ * a truncated pack must never look like a short success. `onFailure` is told what the stream
+ * failed with, which a reader on the far side of an RPC hop does not learn.
  */
 export function demuxGitFetchResponse(
   body: ReadableStream<Uint8Array>,
   maxBytes: number,
+  onFailure?: (error: unknown) => void,
 ): ReadableStream<Uint8Array> {
   let iterator = demuxPackData(body, maxBytes);
   return new ReadableStream({
     async pull(controller) {
-      let next = await iterator.next();
+      let next: IteratorResult<Uint8Array, void>;
+      try {
+        next = await iterator.next();
+      } catch (error) {
+        onFailure?.(error);
+        throw error;
+      }
       if (next.done) controller.close();
       else controller.enqueue(next.value);
     },
@@ -381,8 +389,18 @@ export async function pullGitObjectsIntoCache(
   if (response.body === null) {
     throw new Error("git fetch failed: response had no body");
   }
-  let stored = new Set(await cache.consumePack(
-      demuxGitFetchResponse(response.body, MAX_GIT_FETCH_BYTES)));
+  // When the pack stream itself fails, the overseer's reader sees only that it ended early, and
+  // consumePack() rejects with that. What the stream failed with says why: the transfer limit,
+  // the server's own error, a truncated response.
+  let failure: unknown;
+  let pack = demuxGitFetchResponse(
+      response.body, MAX_GIT_FETCH_BYTES, error => { failure = error; });
+  let stored: Set<GitOid>;
+  try {
+    stored = new Set(await cache.consumePack(pack));
+  } catch (error) {
+    throw failure ?? error;
+  }
   let missing = oids.filter(oid => !stored.has(oid));
   if (missing.length > 0 && !(hints.type === "blob" && hints.filterBlobSize !== undefined)) {
     throw new Error(`git fetch did not provide the requested object${

@@ -344,6 +344,31 @@ describe("pullGitObjectsIntoCache", () => {
     expect(requestLines(requests[0])).toContain(`want ${oid(1)}`);
   });
 
+  it("reports why the fetch failed, not the disconnect the cache saw", async () => {
+    // Across RPC the overseer's reader learns only that the stream ended early.
+    const cache = {
+      async consumePack(pack: ReadableStream<Uint8Array>): Promise<GitOid[]> {
+        await collect(pack).catch(() => {});
+        throw new Error("ReadableStream received over RPC disconnected prematurely.");
+      },
+    };
+    await expect(pullGitObjectsIntoCache(
+        fakeFetch([], [encodePktLine("ERR upload-pack: not our ref")]), [oid(1)], HINTS, cache))
+      .rejects.toThrow("git fetch failed: upload-pack: not our ref");
+  });
+
+  it("reports the cache's own failure when the fetch was sound", async () => {
+    const cache = {
+      async consumePack(pack: ReadableStream<Uint8Array>): Promise<GitOid[]> {
+        await collect(pack);
+        throw new Error("invalid packfile: bad magic");
+      },
+    };
+    await expect(pullGitObjectsIntoCache(
+        fakeFetch([], packfileResponse()), [oid(1)], HINTS, cache))
+      .rejects.toThrow("invalid packfile: bad magic");
+  });
+
   it("throws when a requested non-blob object is missing from the stored list", async () => {
     const cache = fakeCache([oid(1)]);
     await expect(pullGitObjectsIntoCache(
