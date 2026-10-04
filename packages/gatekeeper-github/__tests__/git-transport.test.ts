@@ -13,7 +13,6 @@ import {
   FLUSH_PKT,
   GIT_FETCH_STALL_MS,
   GitRefUpdateRejectedError,
-  MAX_GIT_FETCH_BYTES,
   PktLineParser,
   ZERO_OID,
   buildGitFetchRequest,
@@ -260,26 +259,26 @@ function packfileResponse(options: { withSections?: boolean; progress?: boolean 
 describe("demuxGitFetchResponse", () => {
   it("yields exactly the band-1 payload bytes", async () => {
     const pack = await collect(
-        demuxGitFetchResponse(streamOf(packfileResponse()), MAX_GIT_FETCH_BYTES));
+        demuxGitFetchResponse(streamOf(packfileResponse())));
     expect(pack).toEqual(PACK_BYTES);
   });
 
   it("skips leading sections and progress frames", async () => {
     const pack = await collect(demuxGitFetchResponse(
-        streamOf(packfileResponse({ withSections: true, progress: true })), MAX_GIT_FETCH_BYTES));
+        streamOf(packfileResponse({ withSections: true, progress: true }))));
     expect(pack).toEqual(PACK_BYTES);
   });
 
   it("parses across arbitrary chunk boundaries", async () => {
     const whole = concatBytes(packfileResponse({ withSections: true, progress: true }));
     const rechunked = [whole.subarray(0, 3), whole.subarray(3, 27), whole.subarray(27)];
-    const pack = await collect(demuxGitFetchResponse(streamOf(rechunked), MAX_GIT_FETCH_BYTES));
+    const pack = await collect(demuxGitFetchResponse(streamOf(rechunked)));
     expect(pack).toEqual(PACK_BYTES);
   });
 
   it("fails the stream on an ERR pkt with the server's message", async () => {
     const response = [encodePktLine(`ERR upload-pack: not our ref ${oid(3)}`), FLUSH_PKT];
-    await expect(collect(demuxGitFetchResponse(streamOf(response), MAX_GIT_FETCH_BYTES)))
+    await expect(collect(demuxGitFetchResponse(streamOf(response))))
       .rejects.toThrow(`git fetch failed: upload-pack: not our ref ${oid(3)}`);
   });
 
@@ -289,27 +288,36 @@ describe("demuxGitFetchResponse", () => {
       sidebandPkt(1, PACK_BYTES.subarray(0, 4)),
       sidebandPkt(3, new TextEncoder().encode("fatal: the remote end hung up")),
     ];
-    await expect(collect(demuxGitFetchResponse(streamOf(response), MAX_GIT_FETCH_BYTES)))
+    await expect(collect(demuxGitFetchResponse(streamOf(response))))
       .rejects.toThrow("git fetch failed: fatal: the remote end hung up");
   });
 
   it("rejects a response that ends without a flush", async () => {
     const truncated = packfileResponse().slice(0, -1);
-    await expect(collect(demuxGitFetchResponse(streamOf(truncated), MAX_GIT_FETCH_BYTES)))
+    await expect(collect(demuxGitFetchResponse(streamOf(truncated))))
       .rejects.toThrow(/missing final flush/);
   });
 
   it("rejects a response with no packfile section", async () => {
     const response = [encodePktLine("acknowledgments"), encodePktLine("NAK"), FLUSH_PKT];
-    await expect(collect(demuxGitFetchResponse(streamOf(response), MAX_GIT_FETCH_BYTES)))
+    await expect(collect(demuxGitFetchResponse(streamOf(response))))
       .rejects.toThrow(/no packfile section/);
   });
 
-  it("enforces the transfer-size limit on the raw body", async () => {
-    const response = packfileResponse();
-    const limit = concatBytes(response).byteLength - 1;
-    await expect(collect(demuxGitFetchResponse(streamOf(response), limit)))
-      .rejects.toThrow(/transfer limit/);
+  it("ends the fetch when its reader cancels", async () => {
+    // How a pack over the overseer's cap stops downloading: consumePack() rejects it and
+    // cancels the stream it was reading.
+    let cancelled = false;
+    const pieces = packfileResponse();
+    let index = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { controller.enqueue(pieces[index++]); },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const reader = demuxGitFetchResponse(body).getReader();
+    await reader.read();
+    await reader.cancel();
+    expect(cancelled).toBe(true);
   });
 
   it("gives the fetch up when the server goes quiet", async () => {
@@ -324,7 +332,7 @@ describe("demuxGitFetchResponse", () => {
           controller.enqueue(encodePktLine("packfile"));
         },
       });
-      const outcome = expect(collect(demuxGitFetchResponse(quiet, MAX_GIT_FETCH_BYTES)))
+      const outcome = expect(collect(demuxGitFetchResponse(quiet)))
         .rejects.toThrow("git fetch stalled: the server sent nothing for 60 seconds");
       await vi.advanceTimersByTimeAsync(GIT_FETCH_STALL_MS);
       await outcome;
@@ -338,7 +346,7 @@ describe("demuxGitFetchResponse", () => {
     vi.useFakeTimers();
     try {
       const reader =
-          demuxGitFetchResponse(streamOf(packfileResponse()), MAX_GIT_FETCH_BYTES).getReader();
+          demuxGitFetchResponse(streamOf(packfileResponse())).getReader();
       const chunks = [(await reader.read()).value!];
       await vi.advanceTimersByTimeAsync(10 * GIT_FETCH_STALL_MS);
       for (let next = await reader.read(); !next.done; next = await reader.read()) {

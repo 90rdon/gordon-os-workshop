@@ -30,14 +30,6 @@
 import type { GitOid, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 
 /**
- * Maximum raw HTTP body size accepted from one upload-pack fetch, enforced while streaming (the
- * transfer-size limiter pattern from gatekeeper-context's artifact-sync), matching the cap the
- * overseer's `consumePack()` applies to the pack itself. Nothing here holds the body in memory:
- * it streams through to the overseer, so the limit bounds the work of one pull.
- */
-export const MAX_GIT_FETCH_BYTES = 256 << 20;
-
-/**
  * How long the server may send nothing, while a pull is waiting on it, before the fetch is given
  * up as stalled. Time between reads does not count: the overseer stores the pack as it streams
  * and reads at that pace, so a fetch has no fixed duration to hold it to.
@@ -199,10 +191,10 @@ const OID_PATTERN = /^[0-9a-f]{40}$/;
  *   strictly stronger than any `blob:limit`.
  * - A fetch whose wants are themselves blobs (`hints.type === "blob"`) sends **no filter**: a
  *   blob want has no traversal for a filter to prune, and the filter would not suppress the
- *   wanted blob anyway -- an oversized blob arrives huge, the transfer limiter bounds the
- *   download, and the overseer's `put()`-equivalent size rejection measures and records its
- *   exact size (so later reads fail fast). This is the second of spike 1's two possible worlds;
- *   nothing is ever inferred from an absence.
+ *   wanted blob anyway -- an oversized blob arrives huge, the overseer's caps on a pack and on
+ *   any one object in it bound the download, and its `put()`-equivalent size rejection measures
+ *   and records the blob's exact size (so later reads fail fast). This is the second of spike
+ *   1's two possible worlds; nothing is ever inferred from an absence.
  * - Otherwise `filterBlobSize` maps directly: 0 (fetch no blobs) → `blob:none`, N → `blob:limit=N`
  *   (git's semantics -- omit blobs of size at least N -- match the hint's).
  */
@@ -272,17 +264,20 @@ const BAND_ERROR = 3;
  * irrelevant here, since every fetch is independent and nothing tracks shallow boundaries),
  * then demultiplex the packfile section's sideband (band 1 = pack data, band 2 = progress,
  * discarded, band 3 = fatal server error). An `ERR` pkt or band-3 message fails the stream with
- * the server's message; `maxBytes` bounds the raw body (see MAX_GIT_FETCH_BYTES); a response
- * that ends without a flush-pkt, or without ever reaching a packfile section, is an error --
- * a truncated pack must never look like a short success. `onFailure` is told what the stream
- * failed with, which a reader on the far side of an RPC hop does not learn.
+ * the server's message; a response that ends without a flush-pkt, or without ever reaching a
+ * packfile section, is an error -- a truncated pack must never look like a short success.
+ * `onFailure` is told what the stream failed with, which a reader on the far side of an RPC hop
+ * does not learn.
+ *
+ * Nothing here limits the size of the body. The pack is the overseer's to limit: `consumePack()`
+ * rejects one over its cap and cancels this stream, which ends the fetch. The gatekeeper holds
+ * none of it either way.
  */
 export function demuxGitFetchResponse(
   body: ReadableStream<Uint8Array>,
-  maxBytes: number,
   onFailure?: (error: unknown) => void,
 ): ReadableStream<Uint8Array> {
-  let iterator = demuxPackData(body, maxBytes);
+  let iterator = demuxPackData(body);
   return new ReadableStream({
     async pull(controller) {
       let next: IteratorResult<Uint8Array, void>;
@@ -303,12 +298,10 @@ export function demuxGitFetchResponse(
 
 async function* demuxPackData(
   body: ReadableStream<Uint8Array>,
-  maxBytes: number,
 ): AsyncGenerator<Uint8Array, void, unknown> {
   let reader = body.getReader();
   try {
     let parser = new PktLineParser();
-    let received = 0;
     let inPackfile = false;
     while (true) {
       let result = await readOrStall(reader);
@@ -318,12 +311,7 @@ async function* demuxPackData(
             ? "truncated git fetch response: missing final flush"
             : "git fetch response contained no packfile section");
       }
-      let value = result.value;
-      received += value.byteLength;
-      if (received > maxBytes) {
-        throw new Error(`git fetch response exceeded the ${maxBytes}-byte transfer limit`);
-      }
-      for (let item of parser.push(value)) {
+      for (let item of parser.push(result.value)) {
         if (item.kind === "delim" || item.kind === "response-end") continue;
         if (item.kind === "flush") {
           if (!inPackfile) {
@@ -414,11 +402,10 @@ export async function pullGitObjectsIntoCache(
     throw new Error("git fetch failed: response had no body");
   }
   // When the pack stream itself fails, the overseer's reader sees only that it ended early, and
-  // consumePack() rejects with that. What the stream failed with says why: the transfer limit,
-  // the server's own error, a truncated response.
+  // consumePack() rejects with that. What the stream failed with says why: the server's own
+  // error, a truncated response, a fetch that stalled.
   let failure: unknown;
-  let pack = demuxGitFetchResponse(
-      response.body, MAX_GIT_FETCH_BYTES, error => { failure = error; });
+  let pack = demuxGitFetchResponse(response.body, error => { failure = error; });
   let stored: Set<GitOid>;
   try {
     stored = new Set(await cache.consumePack(pack));
