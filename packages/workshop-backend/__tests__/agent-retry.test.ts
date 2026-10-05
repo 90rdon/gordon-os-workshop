@@ -5,12 +5,15 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { createFauxCore, fauxAssistantMessage, fauxText, fauxThinking } from "@earendil-works/pi-ai";
+import {
+  createFauxCore, fauxAssistantMessage, fauxText, fauxThinking, type AssistantMessage,
+} from "@earendil-works/pi-ai";
 import type {
-  AiChatAuthorInfo, AiChatMessage, AiChatStreamEvent,
+  AiChatAuthorInfo, AiChatMessage, AiChatMetadata, AiChatStreamEvent,
 } from "@gadgets/workshop-shared/api";
 import type { OverseerDurableObject } from "../src/overseer.js";
-import { runAgent } from "../src/agent";
+import type { GadgetRecord } from "../src/storage-schema/overseer-storage.js";
+import { runAgent, type AgentHooks } from "../src/agent";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -18,19 +21,29 @@ declare module "cloudflare:workers" {
   }
 }
 
+// The OverseerImpl members this test drives; the class itself is private to overseer.ts.
+interface OverseerInternals extends AgentHooks {
+  storage: {
+    gadgets: { put(record: GadgetRecord): void };
+    chatMeta: { put(meta: AiChatMetadata): void };
+    chats: { put(message: AiChatMessage): void, list(): Iterable<AiChatMessage> };
+  };
+  nextChatSequence(chatId: number): number;
+}
+
 const OWNER: AiChatAuthorInfo = { type: "user", id: "owner@example.com", name: "Owner" };
 const CHAT_ID = 1;
 
 let doCounter = 0;
 
-async function withImpl(fn: (impl: any) => Promise<void>): Promise<void> {
+async function withImpl(fn: (impl: OverseerInternals) => Promise<void>): Promise<void> {
   let stub = env.TEST_OVERSEER.getByName(`agent-retry-${++doCounter}`);
   await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
-    await fn((instance as unknown as { impl: any }).impl);
+    await fn((instance as unknown as { impl: OverseerInternals }).impl);
   });
 }
 
-function seedChat(impl: any): void {
+function seedChat(impl: OverseerInternals): void {
   impl.storage.gadgets.put({
     type: "gadget", id: 100, title: "App", created: new Date(0), bindingName: "APP",
     bindings: {},
@@ -46,14 +59,14 @@ function seedChat(impl: any): void {
 // Runs one agent turn whose model answers each request with the next scripted response,
 // returning the stream events sent to clients.
 async function runScriptedTurn(
-    impl: any, steps: ReturnType<typeof fauxAssistantMessage>[]): Promise<AiChatStreamEvent[]> {
+    impl: OverseerInternals, steps: AssistantMessage[]): Promise<AiChatStreamEvent[]> {
   let events: AiChatStreamEvent[] = [];
-  impl.emitChatStreamEvent = (_chatId: number, event: AiChatStreamEvent) => events.push(event);
+  impl.emitChatStreamEvent = (_chatId, event) => events.push(event);
   let faux = createFauxCore({ models: [{ id: "faux-model" }] });
   faux.setResponses(steps);
   await runAgent(impl, { model: faux.getModel(), stream: faux.stream }, CHAT_ID,
       { type: "agent", id: "faux-model", name: "Faux" }, new AbortController().signal, OWNER,
-      { provider: "cloudflare", model: "faux-model", apiToken: "" } as any);
+      { provider: "cloudflare", model: "faux-model", apiToken: "" });
   return events;
 }
 
@@ -81,8 +94,7 @@ describe("transient model failures", () => {
     expect(streamedText(events.slice(reset + 1))).toBe("The full answer.");
 
     // Only the retry's answer is persisted, and the turn ended without an error.
-    let messages = ([...impl.storage.chats.list()] as AiChatMessage[])
-        .filter(msg => msg.chatId === CHAT_ID);
+    let messages = [...impl.storage.chats.list()].filter(msg => msg.chatId === CHAT_ID);
     expect(messages.filter(msg => msg.type === "error")).toEqual([]);
     expect(messages.flatMap(msg => msg.type === "message" ? [msg.message] : []))
         .toEqual(["Hi", "The full answer."]);

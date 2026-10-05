@@ -1189,6 +1189,9 @@ export async function runAgent(
         hooks, handle, chatId, author, history, abortSignal, initiator, modelConfig);
     if (outcome.type === "transientFailure") {
       if (++retries > TRANSIENT_FAILURE_RETRIES) throw outcome.error;
+      // The failed request persisted nothing, so the retry starts from the last saved step. What
+      // it streamed was only provisional; clients drop it so the retry doesn't append to it.
+      hooks.emitChatStreamEvent(chatId, {type: "streamReset"});
       await scheduler.wait(1000 * retries);
     }
     if (outcome.type === "compacted") hooks.commitChatCompaction(chatId, outcome.checkpoint);
@@ -3792,18 +3795,10 @@ async function runAgentPass(
 
   if (turnFailure) {
     // Other failures become an AgentTurnError carrying the failing request's HTTP status (when
-    // it can be determined) for the overseer's triage.
+    // it can be determined) for the overseer's triage; runAgent retries a transient one first.
     let message = turnFailure.errorMessage ?? "The model request failed.";
     let error = new AgentTurnError(message, httpStatusFromError(message, handle.lastResponse));
-    // A transient failure can simply run again, even if the request already streamed some
-    // output: the request persisted nothing, so the retry starts from the last saved step. What
-    // it streamed was only ever provisional, so tell clients to discard it -- otherwise the
-    // retry's output would be appended to the failed attempt's partial text, reasoning, tool
-    // cards and edit previews.
-    if (isRetryableAssistantError(turnFailure)) {
-      emitStreamEvent({type: "streamReset"});
-      return {type: "transientFailure", error};
-    }
+    if (isRetryableAssistantError(turnFailure)) return {type: "transientFailure", error};
     throw error;
   }
 
