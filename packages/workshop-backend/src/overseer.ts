@@ -9832,6 +9832,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#clientUser.updatePinned(this.impl.ctx.id.toString(), pinned);
   }
 
+  // Which space a workspace belongs to is recorded by its owner's User DO, which asks the space
+  // whether the owner may add to it. This object stores nothing about spaces.
+  async moveToSpace(spaceKey: string | null): Promise<void> {
+    if (!this.isOwner) {
+      throw new Error("Only the workspace owner can move it to another space.");
+    }
+    await this.#owner.setGadgetSpace(this.impl.ctx.id.toString(), spaceKey);
+  }
+
   async subscribeToWorkpieces(subscriber: RpcStub<WorkpiecesSubscriber>): Promise<RpcStub<{}>> {
     return this.#subscriptionLease(this.impl.subscribeToWorkpieces(subscriber, true));
   }
@@ -11382,6 +11391,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
+  async moveToSpace(_spaceKey: string | null): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)

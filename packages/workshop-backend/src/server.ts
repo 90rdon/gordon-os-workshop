@@ -23,7 +23,7 @@ import { BlueprintKvRecord, listFeaturedBlueprintsFromKv, readBlueprintKvRecord 
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
 import { UserDirectoryDurableObject } from "./user-directory.js";
-import { SpaceDurableObject, checkSpaceKey, noSuchSpace, teamSpaceClaim } from "./spaces.js";
+import { SpaceDurableObject, checkSpaceKey, checkTeamSpaceKey, noSuchSpace, teamSpaceClaim } from "./spaces.js";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
@@ -339,9 +339,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#openGadgetInternal(id, shareKey, configureObservers);
   }
 
-  async newGadget(): Promise<RpcStub<Overseer>> {
+  async newGadget(spaceKey?: string): Promise<RpcStub<Overseer>> {
+    if (spaceKey !== undefined) checkTeamSpaceKey(spaceKey);
     let id = this.overseers.newUniqueId().toString();
-    await this.#user.newGadget(id, "Untitled Workspace");
+    await this.#user.newGadget(id, "Untitled Workspace", spaceKey);
     recordAnalytics(this.ctx, this.env, {
       event_name: "gadget_created",
       user_id: this.#userId.toString(),
@@ -496,8 +497,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async newGadgetFromBlueprint(
     blueprintId: string,
-    bindings: Record<string, BlueprintBindingAssignment>
+    bindings: Record<string, BlueprintBindingAssignment>,
+    spaceKey?: string
   ): Promise<RpcStub<Overseer>> {
+    if (spaceKey !== undefined) checkTeamSpaceKey(spaceKey);
+
     // 1. Read blueprint from KV.
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) throw new Error("Blueprint not found.");
@@ -508,7 +512,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     // 3. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
-    await this.#user.newGadget(id, kvRecord.metadata.title);
+    await this.#user.newGadget(id, kvRecord.metadata.title, spaceKey);
     let overseerResult = await this.#openGadgetInternal(id);
 
     // 4. Initialize from blueprint code.
