@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
-import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
+import { useNavigate, useSearch, Link } from '@tanstack/react-router'
 import { DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import {
   ShareNetwork,
@@ -63,6 +63,7 @@ import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 import ReconnectingChip from './components/ReconnectingChip'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
 import { useWorkspaceOpen } from './useWorkspaceOpen'
+import { useWorkspaceSearchNavigate, type WorkspaceSearch } from './workspaceSearch'
 import { reportIssue } from './errorReporting'
 import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
@@ -437,14 +438,17 @@ function NoGadgetPlaceholder({ height }: { height: string }) {
 
 // ─── component ────────────────────────────────────────────────────────────────
 
-export default function GadgetEditor() {
-  const params = useParams({ strict: false }) as { id?: string }
-  const id = params.id
+/**
+ * The editor is addressed by the workspace it is given, not by the route rendering it: its own
+ * navigations go through `navigateSearch`, which keeps that route and its params and changes
+ * only the search.
+ */
+export default function GadgetEditor({ workspaceId: id }: { workspaceId: string }) {
   const navigate = useNavigate()
+  const navigateSearch = useWorkspaceSearchNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
 
-  const { chat: chatParam, w: workpieceParam } = useSearch({ strict: false }) as
-    { chat?: number; w?: number }
+  const { chat: chatParam, w: workpieceParam } = useSearch({ strict: false }) as WorkspaceSearch
   const urlChatId = chatParam !== undefined ? chatParam : null
   const urlWorkpieceId = workpieceParam !== undefined ? workpieceParam : null
 
@@ -485,7 +489,7 @@ export default function GadgetEditor() {
       if (!isEditingTitleRef.current) setTitleInput(nextMetadata.title)
     },
     onShareKeyConsumed: () => {
-      if (id) navigate({ to: '/workspace/$id', params: { id }, search: {}, replace: true })
+      navigateSearch({ search: {}, replace: true })
     },
     onInvalidShareKey: () => {
       toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
@@ -998,13 +1002,11 @@ export default function GadgetEditor() {
 
     setActiveTab('app')
     setWorkspaceVisibility('open', target.id)
-    navigate({
-      to: '/workspace/$id',
-      params: { id: id! },
+    navigateSearch({
       search: (prev: Record<string, unknown>) => ({ ...prev, w: target.id }),
       replace: true,
     })
-  }, [workpiecesReady, allGadgets, effectiveSelectedChatId, setWorkspaceVisibility, navigate, id])
+  }, [workpiecesReady, allGadgets, effectiveSelectedChatId, setWorkspaceVisibility, navigateSearch])
 
   useEffect(() => {
     const handleResize = () => {
@@ -1126,9 +1128,7 @@ export default function GadgetEditor() {
           setWorkspaceView({ mode: 'chat' })
         }
       }
-      navigate({
-        to: '/workspace/$id',
-        params: { id: id! },
+      navigateSearch({
         // Keep committed selections, but clear draft selections outside their branch.
         search: (prev: Record<string, unknown>) => ({
           ...prev,
@@ -1140,7 +1140,7 @@ export default function GadgetEditor() {
         replace: options?.replace,
       })
     },
-    [id, navigate, selectedWorkpieceSummary?.chatId, workspaceView?.mode]
+    [navigateSearch, selectedWorkpieceSummary?.chatId, workspaceView?.mode]
   )
 
   // ── keep single-chat routing aligned with the current mode ──────────────────
@@ -1150,9 +1150,7 @@ export default function GadgetEditor() {
 
     if (simpleMode) {
       if (urlChatId === 0) {
-        navigate({
-          to: '/workspace/$id',
-          params: { id: id! },
+        navigateSearch({
           search: (prev: Record<string, unknown>) => ({ ...prev, chat: undefined }),
           replace: true,
         })
@@ -1163,7 +1161,7 @@ export default function GadgetEditor() {
     if (pinInitialChatSelection && urlChatId === null) {
       navigateToChat(0, { replace: true })
     }
-  }, [layoutModeReady, simpleMode, pinInitialChatSelection, urlChatId, navigateToChat, navigate, id])
+  }, [layoutModeReady, simpleMode, pinInitialChatSelection, urlChatId, navigateToChat, navigateSearch])
 
   // ── resize handle ─────────────────────────────────────────────────────────────
   //
@@ -1266,14 +1264,12 @@ export default function GadgetEditor() {
     const targetSummary = visibleWorkpieces.find(g => g.id === target.workpieceId)
     if (!targetSummary) return
     if (targetSummary.type === 'worktree' && (!showFullEditor || showingActivity)) return
-    navigate({
-      to: '/workspace/$id',
-      params: { id: id! },
+    navigateSearch({
       search: (prev: Record<string, unknown>) => ({ ...prev, w: target.workpieceId }),
       replace: true,
     })
   }, [streamingActiveFile, selectedWorkpieceId, visibleWorkpieces, showFullEditor, showingActivity,
-      navigate, id])
+      navigateSearch])
 
   // ── workpiece picker handlers ───────────────────────────────────────────────────
   const handleSelectWorkpiece = useCallback((workpieceId: WorkpieceId) => {
@@ -1284,9 +1280,7 @@ export default function GadgetEditor() {
     handleTabSelect(picked?.type === 'worktree' ? 'code' : 'app')
     setWorkspaceVisibility('open', workpieceId)
     const pendingChatId = picked?.chatId
-    navigate({
-      to: '/workspace/$id',
-      params: { id: id! },
+    navigateSearch({
       // Selecting a draft also returns to its creating conversation.
       search: (prev: Record<string, unknown>) => ({
         ...prev,
@@ -1294,7 +1288,7 @@ export default function GadgetEditor() {
         w: workpieceId,
       }),
     })
-  }, [id, navigate, isAgentActive, setWorkspaceVisibility, workpieces, handleTabSelect])
+  }, [navigateSearch, isAgentActive, setWorkspaceVisibility, workpieces, handleTabSelect])
 
   const handleRenameWorkpiece = useCallback(async (workpieceId: WorkpieceId, title: string) => {
     if (!overseer) return
