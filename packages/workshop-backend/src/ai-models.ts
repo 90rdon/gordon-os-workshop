@@ -873,43 +873,41 @@ export function getClassifier(env: Cloudflare.Env, config: AiModelConfig,
   // pi's catalog entry supplies the API, cost and window; only the address varies by route.
   const catalog = (CLOUDFLARE_WORKERS_AI_CLASSIFIER_MODELS as
       Record<string, ClassifierModel<ClassifierApi>>)[config.model];
-  let baseUrl = catalog.baseUrl;
-  let options: ClassifierOptions;
+  const classifierAt = (baseUrl: string, options: ClassifierOptions): Classifier =>
+      context => workersAiClassify({ ...catalog, baseUrl }, context, options);
   const gwConfig = getAiGatewayConfig(env);
-  const binding = gwConfig?.bindingFor(config.provider);
   if (!gwConfig) {
-    baseUrl = workersAiAccountUrl(config);
-    options = { apiKey: config.apiToken, headers: config.extraHeaders };
-  } else if (binding) {
+    return classifierAt(workersAiAccountUrl(config),
+        { apiKey: config.apiToken, headers: config.extraHeaders });
+  }
+  const metadata = buildMetadata(initiator, metadataContext);
+  const binding = gwConfig.bindingFor(config.provider);
+  if (binding) {
     // The gateway's passthrough refuses /run even with the binding's identity, so binding
     // requests take the binding's own run(), which reaches the same gateway. pi's System One
     // transport POSTs {model, input} as Workers AI's REST API takes them and reads back the REST
     // envelope; run() takes and returns the bare values. pi requires a key, which goes unsent.
-    const metadata = buildMetadata(initiator, metadataContext);
-    options = {
+    return classifierAt(catalog.baseUrl, {
       apiKey: CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL,
       fetch: async (_url, init) => {
         const { model, input } = JSON.parse(init!.body as string);
         const result = await binding.run(model, input, { gateway: { id: gwConfig.gateway, metadata } });
         return Response.json({ success: true, result });
       },
-    };
-  } else {
-    // Unlike the chat route, /run wants a Workers AI credential as `Authorization`, and a request
-    // sending this token there is refused even when the token grants Workers AI. Until AI Gateway
-    // authenticates /run as it does chat, this route fails, so the docs have such deployments
-    // disable classifiers.
-    baseUrl = `https://gateway.ai.cloudflare.com/v1/${gwConfig.accountId}/${gwConfig.gateway}/workers-ai`;
-    options = {
-      apiKey: gwConfig.apiToken,
-      headers: {
-        "cf-aig-authorization": `Bearer ${gwConfig.apiToken}`,
-        "cf-aig-metadata": JSON.stringify(buildMetadata(initiator, metadataContext)),
-      },
-    };
+    });
   }
-  const model = { ...catalog, baseUrl };
-  return context => workersAiClassify(model, context, options);
+  // Unlike the chat route, /run wants a Workers AI credential as `Authorization`, and a request
+  // sending this token there is refused even when the token grants Workers AI. Until AI Gateway
+  // authenticates /run as it does chat, this route fails, so the docs have such deployments
+  // disable classifiers.
+  return classifierAt(
+      `https://gateway.ai.cloudflare.com/v1/${gwConfig.accountId}/${gwConfig.gateway}/workers-ai`, {
+        apiKey: gwConfig.apiToken,
+        headers: {
+          "cf-aig-authorization": `Bearer ${gwConfig.apiToken}`,
+          "cf-aig-metadata": JSON.stringify(metadata),
+        },
+      });
 }
 
 // =======================================================================================

@@ -450,7 +450,7 @@ describe("UserDurableObject gateway model modes", () => {
         { provider: "cloudflare", model: "@cf/cloudflare/clef", apiToken: "" });
 
     const classifierIds = ["@cf/cloudflare/clef", "@cf/cloudflare/clef-flash", "my-clef"];
-    expect((await user.listClassifierModels()).map(model => model.id)).toEqual(classifierIds);
+    expect((await user.listModels("classifier")).map(model => model.id)).toEqual(classifierIds);
     const chatIds = await listedIds(user);
     expect(chatIds).toContain("@cf/zai-org/glm-5.2");
     expect(chatIds.filter(id => classifierIds.includes(id))).toEqual([]);

@@ -11,7 +11,7 @@ import {
 } from "./storage-schema/user-storage.js";
 import { recordAnalytics } from "./analytics";
 import { createWorkshopLogger } from "./observability";
-import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
+import { getGatewayModels, type GatewayModels, type ModelKind } from "./ai-gateway.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
 import { deleteBlueprintContent } from "./blueprint-archive.js";
@@ -449,15 +449,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.profile.put(profile);
   }
 
-  async listModels(): Promise<AiChatAuthorInfo[]> {
-    return this.#listModels(await getGatewayModels(this.env), "chat");
+  async listModels(kind: ModelKind = "chat"): Promise<AiChatAuthorInfo[]> {
+    return this.#listModels(await getGatewayModels(this.env), kind);
   }
 
-  async listClassifierModels(): Promise<AiChatAuthorInfo[]> {
-    return this.#listModels(await getGatewayModels(this.env), "classifier");
-  }
-
-  #listModels(models: GatewayModels | null, kind: "chat" | "classifier"): AiChatAuthorInfo[] {
+  #listModels(models: GatewayModels | null, kind: ModelKind): AiChatAuthorInfo[] {
     let result: AiChatAuthorInfo[] = [];
 
     // When AI Gateway mode is active, include the gateway models the deployment offers.

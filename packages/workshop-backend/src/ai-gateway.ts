@@ -164,6 +164,9 @@ export function getAiGatewayConfig(env: Cloudflare.Env): AiGatewayConfig | null 
   return new AiGatewayConfig(env);
 }
 
+/** Which models a list offers: those that chat, or the classifiers (see isClassifierModel()). */
+export type ModelKind = "chat" | "classifier";
+
 /**
  * The models a deployment provides through AI Gateway (`gateway`), each in the mode its admin
  * gave it (see GatewayModelMode): the suggested models of every provider the deployment enables
@@ -252,7 +255,7 @@ export class GatewayModels {
    * The models of one kind offered in pickers, i.e. the enabled ones, as AiChatAuthorInfo
    * entries.
    */
-  list(kind: "chat" | "classifier"): AiChatAuthorInfo[] {
+  list(kind: ModelKind): AiChatAuthorInfo[] {
     return this.all.filter(model => model.mode === "enabled" &&
             isClassifierModel(model.provider, model.id) === (kind === "classifier"))
         .map(({ id, name }) => ({ type: "agent", id, name }));
