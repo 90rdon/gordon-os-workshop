@@ -152,8 +152,8 @@ function ProvidersPage() {
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
-  const [models, setModels] = useState<AiChatAuthorInfo[]>([])
-  const [classifierIds, setClassifierIds] = useState<ReadonlySet<string>>(new Set())
+  const [chatModels, setChatModels] = useState<AiChatAuthorInfo[]>([])
+  const [classifierModels, setClassifierModels] = useState<AiChatAuthorInfo[]>([])
   const [quickModel, setQuickModel] = useState<string | null>(null)
   const [aiConfig, setAiConfig] = useState<AiGatewayInfo | null>(null)
   const [search, setSearch] = useState('')
@@ -167,14 +167,14 @@ function ProvidersPage() {
   const fetchAll = async () => {
     setLoadError(false)
     try {
-      const [modelList, classifierList, qm, cfg] = await Promise.all([
+      const [chatList, classifierList, qm, cfg] = await Promise.all([
         authenticatedApi.listModels(),
         authenticatedApi.listClassifierModels(),
         authenticatedApi.getQuickModel(),
         authenticatedApi.getAiConfig(),
       ])
-      setModels([...modelList, ...classifierList])
-      setClassifierIds(new Set(classifierList.map((model) => model.id)))
+      setChatModels(chatList)
+      setClassifierModels(classifierList)
       setQuickModel(qm)
       setAiConfig(cfg)
       // Each dialog saves a model of the user's own, so none stays open, or opens late, once the
@@ -197,8 +197,9 @@ function ProvidersPage() {
   const gatewayMode = aiConfig?.enabled === true
   // False only on an AI Gateway deployment whose administrator turned adding models off.
   const canAddModels = aiConfig?.enabled !== true || aiConfig.userModelsEnabled
+  const models = [...chatModels, ...classifierModels]
   // Only a chat model can be the quick model, so the quick-model notice needs one.
-  const hasChatModel = models.some((model) => !classifierIds.has(model.id))
+  const hasChatModel = chatModels.length > 0
 
   const isBuiltIn = (modelId: string): boolean =>
     aiConfig?.enabled === true && aiConfig.builtInModelIds.includes(modelId)
@@ -385,7 +386,7 @@ function ProvidersPage() {
                 onEdit={() => openWithSource('edit', model)}
                 onClone={() => openWithSource('clone', model)}
                 onDelete={() => handleDelete(model)}
-                onSetQuick={classifierIds.has(model.id) ? undefined : () => handleSetQuick(model.id)}
+                onSetQuick={classifierModels.includes(model) ? undefined : () => handleSetQuick(model.id)}
               />
             </div>
           ))

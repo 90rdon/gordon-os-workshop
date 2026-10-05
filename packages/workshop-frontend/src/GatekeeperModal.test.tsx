@@ -95,36 +95,39 @@ function authenticatedApi(): RpcStub<AuthenticatedApi> {
   } as unknown as RpcStub<AuthenticatedApi>
 }
 
+let root: Root | undefined
+let container: HTMLDivElement | undefined
+
+afterEach(() => {
+  act(() => root?.unmount())
+  container?.remove()
+  testState.authenticatedApi = null
+  testState.readinessEvents = []
+  vi.unstubAllGlobals()
+})
+
+async function renderModal(props: { initialVendorId?: string, initialResourceUrlPattern?: string } = {}) {
+  testState.authenticatedApi = authenticatedApi()
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
+
+  await act(async () => root!.render(<GatekeeperModal
+    open
+    onClose={() => {}}
+    getOverseer={() => { throw new Error('not called') }}
+    onCreated={() => Promise.resolve()}
+    {...props}
+  />))
+}
+
 describe('GatekeeperModal configurator readiness', () => {
-  let root: Root | undefined
-  let container: HTMLDivElement | undefined
-
-  afterEach(() => {
-    act(() => root?.unmount())
-    container?.remove()
-    testState.authenticatedApi = null
-    testState.readinessEvents = []
-    vi.unstubAllGlobals()
-  })
-
   it('keeps Add connection disabled for a lifecycle null readiness event', async () => {
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       disconnect() {}
     })
-    testState.authenticatedApi = authenticatedApi()
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    root = createRoot(container)
-
-    await act(async () => root!.render(<GatekeeperModal
-      open
-      onClose={() => {}}
-      getOverseer={() => { throw new Error('not called') }}
-      onCreated={() => Promise.resolve()}
-      initialVendorId="catalog"
-      initialResourceUrlPattern={RESOURCE.urlPattern}
-    />))
+    await renderModal({ initialVendorId: 'catalog', initialResourceUrlPattern: RESOURCE.urlPattern })
 
     await vi.waitFor(() => {
       expect(document.body.querySelector('[data-testid="resource-configurator"]')).not.toBeNull()
@@ -138,15 +141,6 @@ describe('GatekeeperModal configurator readiness', () => {
 })
 
 describe('GatekeeperModal model pickers', () => {
-  let root: Root | undefined
-  let container: HTMLDivElement | undefined
-
-  afterEach(() => {
-    act(() => root?.unmount())
-    container?.remove()
-    testState.authenticatedApi = null
-  })
-
   // A classifier can back an AI Model binding but can't run an agent. The AI Model picker labels
   // each model with its kind.
   it.each([
@@ -154,16 +148,7 @@ describe('GatekeeperModal model pickers', () => {
       options: ['Chat models: Chat model', 'Classifier models: Classifier model'] },
     { groupKey: 'platform:agent-spawner', picker: 'Agent model', options: ['None (no agent)', 'Chat model'] },
   ])('offers $options in the $groupKey picker', async ({ groupKey, picker, options }) => {
-    testState.authenticatedApi = authenticatedApi()
-    container = document.createElement('div')
-    document.body.appendChild(container)
-    root = createRoot(container)
-    await act(async () => root!.render(<GatekeeperModal
-      open
-      onClose={() => {}}
-      getOverseer={() => { throw new Error('not called') }}
-      onCreated={() => Promise.resolve()}
-    />))
+    await renderModal()
 
     const group = document.body.querySelector<HTMLButtonElement>(
       `[aria-controls="connection-group-panel-${groupKey}"]`)!
