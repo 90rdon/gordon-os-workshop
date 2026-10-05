@@ -1,7 +1,9 @@
+import { z } from "zod";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SUGGESTED_MODELS, type AiChatAuthorInfo, type AiModelConfig, type BuiltInReasoning,
 } from "@gadgets/workshop-shared/api";
+import { Type } from "@earendil-works/pi-ai";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { serializeAdminConfig } from "../src/admin-config.js";
@@ -1578,6 +1580,22 @@ describe("PDF attachment bridging", () => {
 // Counts the cache breakpoints in an Anthropic request body.
 const breakpointCount = (body: string) => body.split(`"cache_control"`).length - 1;
 
+// The lifetime of each cache breakpoint in an Anthropic request body, in prompt order: tools,
+// system blocks, then messages.
+function breakpointTtls(body: string): string[] {
+  const blocks = z.object({ cache_control: z.object({ ttl: z.string().optional() }).optional() });
+  const request = z.object({
+    tools: z.array(blocks).default([]),
+    system: z.array(blocks).default([]),
+    messages: z.array(z.object({ content: z.union([z.string(), z.array(blocks)]) })),
+  }).parse(JSON.parse(body));
+  return [
+    ...request.tools,
+    ...request.system,
+    ...request.messages.flatMap(message => typeof message.content === "string" ? [] : message.content),
+  ].flatMap(block => block.cache_control ? [block.cache_control.ttl ?? "5m"] : []);
+}
+
 describe("System prompt cache blocks", () => {
   // The agent's leading system message: shared text as its content, project-specific text as a
   // section (see runAgentPass). Every handle's onPayload hook splits pi's single system block
@@ -1585,6 +1603,7 @@ describe("System prompt cache blocks", () => {
   // outgoing request with one whose prompt is the same text as plain content.
   const STATIC_TEXT = "Shared instructions.";
   const RENDERED_TEXT = `${STATIC_TEXT}\n\nThis workspace's gadgets.`;
+  const TOOL = { name: "lookUp", description: "Looks something up.", parameters: Type.Object({}) };
 
   async function captureBody(
       handle: ModelHandle, sections: boolean,
@@ -1595,9 +1614,10 @@ describe("System prompt cache blocks", () => {
         sections
             ? {
                 role: "system", content: STATIC_TEXT,
-                sections: { environment: "This workspace's gadgets." }, timestamp: 0,
+                sections: { environment: "This workspace's gadgets." }, toolsAdded: [TOOL],
+                timestamp: 0,
               }
-            : { role: "system", content: RENDERED_TEXT, timestamp: 0 },
+            : { role: "system", content: RENDERED_TEXT, toolsAdded: [TOOL], timestamp: 0 },
         { role: "user", content: "hello", timestamp: 0 },
       ],
     }, { fetch: fetchStub, maxRetries: 0, ...options });
@@ -1618,12 +1638,16 @@ describe("System prompt cache blocks", () => {
 
     const { system: unsplitSystem } = JSON.parse(unsplit);
     expect(unsplitSystem.at(-1)).toMatchObject({ text: RENDERED_TEXT });
+    const forAnHour = { type: "ephemeral", ttl: "1h" };
     expect(JSON.parse(split).system).toEqual([
-      ...unsplitSystem.slice(0, -1),
-      { type: "text", text: STATIC_TEXT, cache_control: { type: "ephemeral" } },
+      ...unsplitSystem.slice(0, -1).map((block: object) => ({ ...block, cache_control: forAnHour })),
+      { type: "text", text: STATIC_TEXT, cache_control: forAnHour },
       { type: "text", text: RENDERED_TEXT.slice(STATIC_TEXT.length) },
     ]);
     expect(breakpointCount(split)).toBe(breakpointCount(unsplit));
+    // The head is kept for an hour and the chat's messages for 5 minutes. Anthropic rejects a
+    // 1-hour breakpoint after a 5-minute one.
+    expect(breakpointTtls(split)).toEqual(["1h", ...unsplitSystem.map(() => "1h"), "5m"]);
   }, 15000);
 
   function openAiHandle(model: string): ModelHandle {

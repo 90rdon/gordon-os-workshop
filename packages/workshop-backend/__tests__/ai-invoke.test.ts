@@ -62,7 +62,7 @@ describe("completeText", () => {
     const handle = getModel({
       CF_AI_GATEWAY: "platform-gateway",
       CF_AI_GATEWAY_ACCOUNT_ID: "account-id",
-      CF_AI_GATEWAY_PROVIDERS: "cloudflare",
+      CF_AI_GATEWAY_PROVIDERS: "cloudflare,anthropic",
       WORKERS_AI: { fetch },
     } as unknown as Cloudflare.Env,
         { provider: "cloudflare", model: MODEL, apiToken: "", ...config },
@@ -98,5 +98,18 @@ describe("completeText", () => {
     expect(await completeText(handle, { prompt: "hello", thinking: false })).toBe("OK");
     expect(await completeText(handle, { prompt: "hello", thinking: true })).toBe("OK");
     expect(bodies.map(body => body.reasoning_effort)).toEqual(["none", "none", "high"]);
+  });
+
+  // A one-shot prompt is sent once, so caching it would only add the cost of the cache write.
+  it("asks the provider to cache the prompt only when told to", async () => {
+    const { handle, bodies } = answering({ provider: "anthropic", model: "claude-sonnet-4-5" });
+    // The stub answers in Workers AI's format, which the Anthropic adapter rejects once the
+    // request is sent.
+    await expect(completeText(handle, { systemPrompt: "Be brief.", prompt: "hello" }))
+        .rejects.toThrow();
+    await expect(completeText(handle, { systemPrompt: "Be brief.", prompt: "hello", cache: true }))
+        .rejects.toThrow();
+    expect(bodies.map(body => JSON.stringify(body).includes(`"cache_control"`)))
+        .toEqual([false, true]);
   });
 });

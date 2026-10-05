@@ -703,6 +703,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       await completeText(handle, {
         prompt: "Reply with OK.", maxTokens: Math.min(test.maxTokens, handle.model.maxTokens),
         thinking: test.thinking, signal,
+        // Agent turns let the provider cache their prompts, so a model that rejects the cache
+        // fields fails here rather than in the first turn.
+        cache: true,
         // The request is the same every time, which a gateway that caches responses would
         // answer without asking the provider.
         headers: { "cf-aig-skip-cache": "true" },

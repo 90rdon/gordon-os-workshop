@@ -935,9 +935,11 @@ class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding
     // TODO: Should we be calling authorizeObservation() here? It's not really observing anything,
     //   but you might want the audit logs?
     // TODO: Account LLM costs back to the calling gadget.
+    // A gadget may call its binding many times with the same system prompt.
     return await completeText(this.model, {
       prompt: options.prompt,
       systemPrompt: options.systemPrompt,
+      cache: true,
     });
   }
 }

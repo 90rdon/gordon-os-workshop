@@ -49,7 +49,8 @@ export function httpStatusFromError(errorMessage: string, response: ModelHandle[
  * text. Used for one-shot calls: title generation, binding naming, compaction summaries, and
  * LanguageModelBinding.run. Requests thinking off unless asked (one-shots should be quick, and
  * none of them benefit from extended thinking; pre-pi, these calls never configured thinking
- * either). Throws AgentTurnError on provider failure, or the abort reason when `signal` fired.
+ * either), and prompt caching off unless asked. Throws AgentTurnError on provider failure, or the
+ * abort reason when `signal` fired.
  */
 export async function completeText(handle: ModelHandle, args: {
   systemPrompt?: string;
@@ -65,6 +66,12 @@ export async function completeText(handle: ModelHandle, args: {
    * level, or its model's built-in request (see ModelStreamOptions.thinking). Default: false.
    */
   thinking?: boolean;
+  /**
+   * When true, the provider may cache the prompt, for a caller that sends the same prompt prefix
+   * again. Default: false, because caching a prompt that is sent once only adds the cost of the
+   * cache write.
+   */
+  cache?: boolean;
 }): Promise<string> {
   const messages: Message[] = args.messages ??
       [{ role: "user", content: args.prompt ?? "", timestamp: Date.now() }];
@@ -76,6 +83,7 @@ export async function completeText(handle: ModelHandle, args: {
     signal: args.signal,
     headers: args.headers,
     thinking: args.thinking ?? false,
+    ...(args.cache ? {} : { cacheRetention: "none" }),
   });
   const message = await stream.result();
   if (message.stopReason === "error" || message.stopReason === "aborted") {
