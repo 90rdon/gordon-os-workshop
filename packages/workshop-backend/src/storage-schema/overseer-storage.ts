@@ -23,8 +23,8 @@ import {
   actionChangeTime,
   type ActionState, type AgentSpawnerConfig, type AiChatAuthorInfo, type AiChatMessage,
   type AiChatMetadata, type BlueprintBindingAnnotation, type BlueprintMetadata,
-  type BlueprintOutput, type ChatGadgetPin, type CollaboratorRole, type GatekeeperCreationSpec,
-  type PermissionEdge, type WorkpieceId,
+  type BlueprintOutput, type ChatGadgetPinRecord, type CollaboratorRole, type GadgetUpstream,
+  type GatekeeperCreationSpec, type PermissionEdge, type WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import type { CodeChange } from "@gadgets/workshop-shared/code-change";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
@@ -175,6 +175,24 @@ export type GadgetRecord = {
    * when the gadget has no files yet), so promotion establishes the invariant too.
    */
   commitId?: string;
+
+  /**
+   * The blueprint this gadget follows and the release of it the gadget most recently merged.
+   * Set when the gadget is instantiated from a blueprint, and by each accept of a proposal to
+   * merge one into it (see AiChatMessageBody.blueprintMerges). A gadget created from scratch
+   * is born with one that names no blueprint, which is how it says so.
+   *
+   * Absent if where the gadget came from is not known. That is so of a gadget an agent is
+   * creating from a blueprint, until the creation is accepted. Otherwise it is so only of a
+   * gadget made before this was recorded, and not of all of those: where the chat log still
+   * told, migrateToBlueprintUpstreams() marked the ones made from scratch, and named the
+   * blueprint, with no release, of the ones an agent created from one.
+   *
+   * The record has to name the blueprint because the release commit in the gadget's history
+   * does not: a blueprint id is a share link, and release commits travel on into the packs of
+   * blueprints derived from them.
+   */
+  upstream?: GadgetUpstream;
 
   /**
    * This gadget's bindings: binding name (as it appears in the gadget worker's `env`) -> binding
@@ -337,9 +355,10 @@ export interface GitObjectMetadataRecord {
   onRemote: WorkpieceId[];
 
   /**
-   * Unproven pull-routing hints: gatekeepers that advertised this commit or put() an object
-   * referencing this one. Used to route pulls and to bound the marking walk; grants no reads.
-   * A wrong claim only misroutes a pull (the next recorded source is tried).
+   * Unproven pull-routing hints: gatekeepers that advertised this commit, or that are recorded
+   * as a source, proven or not, of a stored object referencing this one. Used to route pulls
+   * and to bound the marking walk; grants no reads. A wrong claim only misroutes a pull (the
+   * next recorded source is tried).
    */
   pullableFrom: WorkpieceId[];
 
@@ -604,10 +623,10 @@ export type CompactionCheckpoint = {
   observedCodeVersion?: number;
 
   /**
-   * The pins active at the boundary (see ChatGadgetPin). Replay establishes their base trees
-   * before applying `proposedChange`.
+   * The pins active at the boundary: each gadget's last surviving declaration before it (see
+   * ChatGadgetPinRecord). Replay establishes their base trees before applying `proposedChange`.
    */
-  pins?: ChatGadgetPin[];
+  pins?: ChatGadgetPinRecord[];
 
   /**
    * Sequence of the message that opened the epoch the boundary lies in, mirroring
@@ -624,16 +643,16 @@ export type CompactionCheckpoint = {
   proposedChanges?: Uint8Array;
 
   /**
-   * Still-proposed code changes from before the boundary, composed into one change (bounded by
-   * content size, not edit history). Individual batches remain addressable through the chat
-   * log, so reverting to a point before the boundary is still possible.
+   * Still-proposed code changes from before the boundary, composed into one change over `pins`
+   * (bounded by content size, not edit history). Individual batches remain addressable through
+   * the chat log, so reverting to a point before the boundary is still possible.
    *
-   * Provisional gadget creations and binding additions from before the boundary are deliberately
-   * absent: they carry no change, and the registry rows they created (`GadgetRecord.pending`,
-   * `BindingRecord.pending`) already record them with the sequence that did, untouched by
-   * compaction. Merge and revert promote and delete from there rather than from the log, so
-   * duplicating them here would be a second source of truth. See getProposedChanges(), which
-   * reports the compacted prefix as pending when either this or such a row exists.
+   * This is content and nothing else: what replay applies over the pins' trees. It is absent
+   * when the composition leaves nothing, which says nothing about whether the prefix proposes
+   * anything. A pin can be the whole of a proposal (a merge commit, see ChatGadgetPinRecord), and
+   * provisional gadget creations and binding additions are recorded by the registry rows they
+   * created (`GadgetRecord.pending`, `BindingRecord.pending`), untouched by compaction. What a
+   * chat proposes is read from that state, never from this (see mergeChanges).
    */
   proposedChange?: CodeChange;
 };
@@ -765,8 +784,8 @@ type ChatAttachmentContentRecord = {
 /**
  * One accepted row of a chat's code-change stream: the uncommitted-changes representation (see
  * ChatCodeBase in the API). Every producer's change -- a user submitCodeChange(), an agent tool
- * edit, an updateChatFromMainline() merge -- becomes one row, numbered by a per-generation
- * revision counter and broadcast to subscribers as `changeApplied`. Rows are periodically
+ * edit -- becomes one row, numbered by a per-generation revision counter and broadcast to
+ * subscribers as `changeApplied`. Rows are periodically
  * *materialized* into a durable "changes" message (see materializeChatChanges): the message's
  * `change` re-records their composition and its `watermark` names the rows it absorbed.
  */
@@ -979,6 +998,18 @@ export type ObserverRecord = {
 // =======================================================================================
 // Blueprints
 
+/** One published version of a blueprint's code (see blueprint-release.ts). */
+export type BlueprintRelease = {
+  /** The blueprint's version counter at this release (`BlueprintMetadata.version`). */
+  version: number;
+
+  /** The release commit, in the workspace's git object store. */
+  releaseCommit: string;
+
+  /** The commit of the source gadget whose tree the release took. */
+  sourceCommit: string;
+};
+
 /** Blueprint record stored in the Overseer DO's `blueprints` collection. */
 export type BlueprintGadgetRecord = {
   id: string;
@@ -989,11 +1020,22 @@ export type BlueprintGadgetRecord = {
 
   /**
    * The commit (in the workspace's git object store) whose tree was exported into this
-   * blueprint. Every record written since git-backed code storage carries it (a blueprint of a
-   * gadget with no committed code cannot be created); absent only on records written before,
-   * which carry `codeVersion` instead until the migration converts them.
+   * blueprint: the source of its latest release. Every record written since git-backed code
+   * storage carries it (a blueprint of a gadget with no committed code cannot be created);
+   * absent only on records written before, which carry `codeVersion` instead until the
+   * migration converts them.
    */
   commitId?: string;
+
+  /**
+   * The blueprint's releases, oldest first: one per published version of its code, and each
+   * the first parent of the next. The last is what `metadata.commitId` names.
+   *
+   * Absent on a record last published before releases were commits. The release it published
+   * is then the snapshot release of `commitId`'s files (see `buildSnapshotRelease()`), which
+   * its first entry here will have as parent.
+   */
+  releases?: BlueprintRelease[];
 
   /**
    * Legacy (pre-git-storage): version of the workspace code (from the read-only `code`
@@ -1047,6 +1089,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       //   4 = unified workpiece records: every row of the `gadgets` collection carries the
       //       WorkpieceRecord `type` discriminant (pre-existing rows stamped "gadget"); worktree
       //       rows may exist from here on.
+      //   5 = gadgets made before gadgets recorded where they came from say so as `upstream`,
+      //       where the chat log still told: those an agent created from a blueprint name it,
+      //       and those created from scratch name none. Every gadget created from here on has
+      //       an `upstream` once it is permanent.
       version: 0,
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)

@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AiChatStreamEvent, BlueprintBinding, BlueprintMerge, BlueprintOutput, ChatGadgetPin, ChatGadgetPinRecord, MainlineMergeGadget, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -305,9 +305,10 @@ export interface AgentHooks {
    * messages (`msgs`, the tool-call record among them), validate and append each buffered
    * change as a chat change row -- one row per tool call, in call order, with the same
    * pin/codeBase bookkeeping the appends always had -- materialize the rows into the step's
-   * single "changes" message carrying the step's gadget creations, binding additions, and
-   * worktree head advancements (stamping pending gadget and binding records, making created
-   * worktrees permanent, and advancing worktree heads), and retire the rows. The step's effects
+   * single "changes" message carrying the step's gadget creations (with the blueprint release
+   * each was created from, if any), binding additions, and worktree head advancements (stamping
+   * pending gadget and binding records, making created worktrees permanent, and advancing
+   * worktree heads), and retire the rows. The step's effects
    * are thus durable iff its transcript record is; a crash mid-step loses both, and the resumed
    * model re-runs the step against unmodified content. Returns whether a "changes" message was
    * written (change-ID numbering counts messages).
@@ -331,6 +332,7 @@ export interface AgentHooks {
         createdWorktrees: {worktreeId: WorkpieceId, title: string, bindingName: string}[],
         addedBindings: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[],
         worktreeCommits: {worktreeId: WorkpieceId, commit: string, previousHead: string}[],
+        blueprintMerges: BlueprintMerge[],
       },
       usage?: Usage, aiGatewayLogId?: string,
       aiGatewayLogRoute?: AiGatewayLogRoute): Promise<boolean>;
@@ -367,6 +369,13 @@ export interface AgentHooks {
   readCommitFiles(oid: string): Promise<Map<string, string>>;
 
   /**
+   * The paths of the files whose entry differs between two commits' trees, added and removed
+   * ones included, in sorted order. Compares tree objects by id, so no file is read, and a
+   * subtree that is the same on both sides is not read either.
+   */
+  listChangedPaths(fromCommit: string, toCommit: string): Promise<string[]>;
+
+  /**
    * Summarize the workspace's gadgets for the system prompt and for describeBinding's `gadget`
    * lookups (see AgentGadgetInfo). Gadgets still provisional to a chat other than `forChatId` are
    * omitted.
@@ -388,11 +397,12 @@ export interface AgentHooks {
    * the given chat: it becomes permanent only when the user accepts the chat's changes through
    * the "changes" message that records the creation (GadgetRecord.pending in overseer-storage.ts).
    * Throws if the binding name is invalid or already claimed by another gadget (including one
-   * still pending in another chat). Returns the id and the (trimmed) title as created. `output`
-   * is the format declared by the blueprint being instantiated, if any (see fetchBlueprint).
+   * still pending in another chat). Returns the id and the (trimmed) title as created.
+   * `blueprint` is the blueprint being instantiated, if any, and `output` the format it declares
+   * (see fetchBlueprint). A gadget created from none is recorded as made from scratch.
    */
-  createGadget(title: string, bindingName: string, chatId: number, output?: BlueprintOutput)
-      : {id: WorkpieceId, title: string};
+  createGadget(title: string, bindingName: string, chatId: number,
+               blueprint?: {output?: BlueprintOutput}): {id: WorkpieceId, title: string};
 
   /**
    * Create a new worktree workpiece rooted at the given commit id (a full oid, resolved against
@@ -594,11 +604,15 @@ export interface AgentHooks {
    * Fetch a blueprint's decoded files, plus formatted notes describing the copied files and the
    * bindings the blueprint's code expects the agent to wire up. Used by the createGadget tool to
    * instantiate the blueprint as a new gadget, along with the output format the blueprint declares
-   * (if any), which the created gadget inherits. Throws an agent-readable error if the blueprint
-   * doesn't exist.
+   * (if any), which the created gadget inherits. `merge` is the record of the release the files
+   * are, for the creation's "changes" message once the gadget has an id (see
+   * AiChatMessageBody.blueprintMerges). Throws an agent-readable error if the blueprint doesn't
+   * exist.
    */
-  fetchBlueprint(blueprintId: string)
-      : Promise<{files: Record<string, string>, notes: string, output?: BlueprintOutput}>;
+  fetchBlueprint(blueprintId: string): Promise<{
+    files: Record<string, string>, notes: string, output?: BlueprintOutput,
+    merge: Omit<BlueprintMerge, "gadgetId">,
+  }>;
 }
 
 // =======================================================================================
@@ -871,6 +885,240 @@ The Gadget expects you to implement the TypeScript interface \`${mainType}\`, de
 ${types.trim()}
 \`\`\`
 `.trim();
+}
+
+/**
+ * Tells the agent which bindings a blueprint's code expects that a gadget lacks, and how to wire
+ * each one up. `gadget` is what the text calls the gadget, as in "the new gadget". Shared by
+ * the createGadget tool's result for a gadget made from a blueprint (see
+ * AgentHooks.fetchBlueprint) and the summary of a blueprint merged into an existing gadget.
+ */
+export function formatMissingBlueprintBindings(
+    bindings: Record<string, BlueprintBinding>, gadget: string): string {
+  let lines = [
+      `The blueprint's code expects the following bindings, which ${gadget} does not ` +
+      `have yet. Wire up each one under the exact binding name given. For external ` +
+      `resources, use setGadgetBinding on ${gadget} (first requesting a connection via ` +
+      `requestConnection if your env doesn't already hold a suitable resource). AI-model ` +
+      `and agent-spawner bindings cannot be created from chat; ask the user to add those ` +
+      `from the gadget's Connections panel.`];
+  for (let [name, binding] of Object.entries(bindings)) {
+    let details: string;
+    switch (binding.type) {
+      case "gatekeeper":
+        details = `external resource via the "${binding.gatekeeperName}" gatekeeper; ` +
+            `resource URL pattern ${JSON.stringify(binding.typeUrlPattern)}` +
+            (binding.resourceUrl
+                ? `; the blueprint author suggests ${JSON.stringify(binding.resourceUrl)}`
+                : ``);
+        break;
+      case "aiModel":
+        details = `an AI model binding`;
+        break;
+      case "agentSpawner":
+        details = `an agent-spawner binding`;
+        break;
+      default:
+        binding satisfies never;
+        details = `unknown`;
+        break;
+    }
+    lines.push(`* ${name} — ${JSON.stringify(binding.title)} (${details})` +
+        (binding.description ? `: ${binding.description}` : ``));
+  }
+  return lines.join("\n");
+}
+
+// How many files each list in the agent's summary of a merge, of a blueprint or from mainline,
+// names before it counts the rest instead, so that a merge of very many files cannot fill the
+// context with paths.
+const MERGE_SUMMARY_PATH_LIMIT = 50;
+
+// One list of files in such a summary: nothing if there are none, else the heading and the
+// paths. The paths are quoted because someone else chose them, such as a blueprint's author.
+function formatMergedPaths(heading: string, paths: string[]): string[] {
+  if (paths.length === 0) return [];
+  let lines = paths.slice(0, MERGE_SUMMARY_PATH_LIMIT).map(path => `* ${JSON.stringify(path)}`);
+  if (paths.length > lines.length) lines.push(`* (and ${paths.length - lines.length} more)`);
+  return ["", heading, ...lines];
+}
+
+/**
+ * The files that a three-way merge changed and did not report as conflicted, by whether the
+ * side the files were merged into had changes of its own to them. `base` is the commit the two
+ * sides have in common, `incoming` the side merged in, and `own` the side merged into. A file is
+ * listed if it differs between `base` and `incoming` and between `own` and `incoming`, so a file
+ * that both sides changed alike is not. Compares trees by id, so no file is read.
+ */
+async function classifyMergedPaths(
+    hooks: Pick<AgentHooks, "listChangedPaths">,
+    sides: {base: string, incoming: string, own: string}, conflictPaths: string[])
+    : Promise<{bothChanged: string[], incomingChanged: string[]}> {
+  let [incomingChanges, ownToIncoming, ownChanges] = await Promise.all([
+    hooks.listChangedPaths(sides.base, sides.incoming),
+    hooks.listChangedPaths(sides.own, sides.incoming),
+    hooks.listChangedPaths(sides.base, sides.own),
+  ]);
+  let differs = new Set(ownToIncoming);
+  let changedByOwn = new Set(ownChanges);
+  let conflicted = new Set(conflictPaths);
+  let bothChanged: string[] = [];
+  let incomingChanged: string[] = [];
+  for (let path of incomingChanges) {
+    if (!differs.has(path) || conflicted.has(path)) continue;
+    (changedByOwn.has(path) ? bothChanged : incomingChanged).push(path);
+  }
+  return {bothChanged, incomingChanged};
+}
+
+// The opening of the agent's summary of an update from mainline, before each gadget's part.
+const MAINLINE_MERGE_INTRO =
+    `The user updated this chat with the changes accepted from other chats since it was last ` +
+    `brought up to date.`;
+
+/**
+ * Renders one gadget's part of an update from mainline (see Overseer.updateChatFromMainline())
+ * for the model, which sees it as an observation of the user's changes, after
+ * MAINLINE_MERGE_INTRO. `entry` is the gadget's part of the message's record, `declaration` the
+ * message's pin declaration for it, and `gadget` its name in the chat's env. `forgotten` names
+ * the files the model had read whose text the update changed (see applyReplayedPin), which it
+ * must read again: readFile promises to say when that happens.
+ *
+ * The update merged the chat's files with mainline, so its diff could be as large as everything
+ * the other chats changed. The summary names the commits of the merge instead, with a way to
+ * diff any two, and lists the files by what the merge did with them. Its size does not depend on
+ * what is in the files. It sets no task: the chat is the user's.
+ */
+async function formatMainlineMerge(
+    entry: MainlineMergeGadget, declaration: ChatGadgetPinRecord, gadget: string,
+    forgotten: string[], hooks: Pick<AgentHooks, "listChangedPaths">): Promise<string> {
+  let mainline = declaration.mergedCommit ?? declaration.baseCommit;
+  let {bothChanged, incomingChanged} = await classifyMergedPaths(hooks,
+      {base: entry.baseCommit, incoming: mainline, own: entry.chatCommit}, entry.conflictPaths);
+  let lines = [
+    `The files of \`env.${gadget}\` in this chat are now the result of a three-way merge.`,
+    ``,
+    `The commits that were merged, and the result:`,
+    `* merged base, the version this chat was last based on: ${entry.baseCommit}`,
+    `* mainline, with the other chats' changes: ${mainline}`,
+    `* this chat, before the update: ${entry.chatCommit}`,
+    `* the result, which this chat's files now start from: ${declaration.baseCommit}`,
+    ``,
+    `To see what changed from one commit to another, run in \`executeCode\`:`,
+    `  (await env.GIT.newWorktree("<to>")).diff("<from>")`,
+    `From merged base to mainline is what the other chats changed. From this chat before the ` +
+        `update to the result is what the update did to this chat's files.`,
+    ...formatMergedPaths(`Files with conflicts:`, entry.conflictPaths),
+  ];
+  if (entry.conflictPaths.length > 0) {
+    lines.push(
+        `A file listed as conflicted that has no markers in it was deleted on one side and ` +
+        `changed on the other: it holds the changed version.`);
+  }
+  lines.push(
+      ...formatMergedPaths(
+          `Files that this chat and mainline both changed, merged with no conflict found:`,
+          bothChanged),
+      ...formatMergedPaths(`Files that only mainline changed:`, incomingChanged));
+  if (forgotten.length > 0) {
+    // Not capped like the lists above: the model read every one of these itself.
+    lines.push(``,
+        `Files you read earlier that the update changed, which you must read again before ` +
+            `editing them:`,
+        ...forgotten.map(path => `* ${JSON.stringify(path)}`));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Renders a blueprint that the user applied to a gadget (see GadgetClient.applyBlueprint()) as
+ * the model's input, from the record of the proposal and the "changes" message `msg` that
+ * carries it. `gadget` is the gadget's name in the chat's env, if it has one.
+ *
+ * A merge is rendered for review: a summary of it and the task of checking it. That is what
+ * prompts the turn applyBlueprint() starts, which has no message to answer. The merge is a
+ * commit, whose diff could be as large as everything the blueprint changed. So the summary
+ * names the commits of the merge instead, with a way to diff any two, and lists the files by
+ * what the merge did with them. Its size does not depend on what is in the files.
+ *
+ * Any other proposal left the agent nothing to check. It is rendered as a note of what
+ * happened, for a later turn in the chat to know of.
+ */
+async function formatBlueprintProposal(
+    merge: BlueprintMerge, msg: Pick<Extract<AiChatMessage, {type: "changes"}>, "pins">,
+    gadget: string | undefined, hooks: Pick<AgentHooks, "listChangedPaths">): Promise<string> {
+  let applied = `The user applied version ${merge.version} of the blueprint ` +
+      `${JSON.stringify(merge.title)} to ` +
+      (gadget !== undefined ? `the gadget \`env.${gadget}\`` : `a gadget`) +
+      `, as a proposed change in this chat.`;
+  if (merge.kind === "follow") {
+    return `${applied} None of the gadget's files change: accepting it only has the gadget ` +
+        `take its future updates from that blueprint.`;
+  }
+  if (merge.kind === "fastForward") {
+    return `${applied} The gadget had no changes of its own to keep, so its files are now ` +
+        `that version's exactly.`;
+  }
+
+  // A merge is always recorded with its base, on the message that re-roots the gadget at the
+  // merge commit, whose `mergedCommit` is the head it merged into (see applyBlueprint in
+  // overseer.ts).
+  let base = merge.baseCommit!;
+  let declaration = msg.pins!.find(pin => pin.gadgetId === merge.gadgetId)!;
+  let head = declaration.mergedCommit ?? declaration.baseCommit;
+  let {bothChanged, incomingChanged: blueprintChanged} = await classifyMergedPaths(hooks,
+      {base, incoming: merge.commitId, own: head}, merge.conflictPaths);
+
+  let lines = [
+    `${applied} The gadget has changes of its own, so the blueprint's changes were merged ` +
+        `with them, three ways. The gadget's files in this chat are now the result.`,
+    ``,
+    `The commits that were merged, and the result:`,
+    `* base, the version the two have in common: ${base}`,
+    `* this gadget, before the merge: ${head}`,
+    `* blueprint: ${merge.commitId}`,
+    `* the result, which the gadget's files in this chat start from: ${declaration.baseCommit}`,
+    ``,
+    `To see what changed from one commit to another, run in \`executeCode\`:`,
+    `  (await env.GIT.newWorktree("<to>")).diff("<from>")`,
+    `From base to blueprint is what the blueprint changed. From this gadget before the merge ` +
+        `to the result is what the merge did to the gadget's files. To read a commit's files ` +
+        `with \`readFile\` and \`grep\`, mount it with \`createWorktree\`.`,
+  ];
+  if (merge.unverifiedBase) {
+    lines.push(``,
+        `The gadget and the blueprint share no history, so that base is a guess at what the ` +
+        `gadget was built from. A change that the gadget's owner made, if the guess happens ` +
+        `to include it, looks like something the blueprint removed: the merge undid it and ` +
+        `reported no conflict. Compare the gadget before the merge with the result, and ` +
+        `tell the user of anything lost that looks like their own work.`);
+  }
+  lines.push(
+      ...formatMergedPaths(`Files with conflicts:`, merge.conflictPaths),
+      ...formatMergedPaths(
+          `Files that the gadget and the blueprint both changed, merged with no conflict found:`,
+          bothChanged),
+      ...formatMergedPaths(`Files that only the blueprint changed:`, blueprintChanged));
+  if (merge.missingBindings) {
+    lines.push(``, formatMissingBlueprintBindings(merge.missingBindings, `the gadget`));
+  }
+
+  lines.push(``, `Review the merge now, without waiting to be asked:`);
+  if (merge.conflictPaths.length > 0) {
+    lines.push(
+        `* Resolve every conflict. A file listed as conflicted that has no markers in it was ` +
+        `deleted by one side and changed by the other: it holds the changed version, and ` +
+        `whether it should stay is yours to decide.`);
+  }
+  lines.push(
+      `* Check that the gadget's own changes and the blueprint's still work together, ` +
+      `starting with any files that both changed. Changes that merge cleanly can still ` +
+      `disagree, as when one side renames something that the other side's new code uses.`);
+  if (merge.missingBindings) lines.push(`* Wire up the bindings listed above.`);
+  lines.push(
+      `Change nothing else: the user asked for the update, not for other improvements. When ` +
+      `you are done, tell the user briefly what the update changed and what you did.`);
+  return lines.join("\n");
 }
 
 let READ_FILE_TOOL_DESCRIPTION = `
@@ -1230,6 +1478,10 @@ async function runAgentPass(
   // reconciliation reaps (see reconcilePendingGadgets in overseer.ts).
   let pendingCreatedGadgets: {gadgetId: WorkpieceId, title: string, bindingName: string}[] = [];
 
+  // The blueprint release that each of those created from a blueprint was created from,
+  // awaiting the same barrier and message (see AiChatMessageBody.blueprintMerges).
+  let pendingBlueprintMerges: BlueprintMerge[] = [];
+
   // Worktrees created this step (see the createWorktree tool), awaiting the same barrier: its
   // "changes" message records each creation (`createdWorktrees`) and makes the pending record
   // permanent (see WorktreeRecord.pending in overseer-storage.ts).
@@ -1471,9 +1723,10 @@ async function runAgentPass(
   // the knowledge is anchored to committed code -- an unpinned read of a gadget's head or a
   // worktree's accepted commit (AiToolCall.observedOid) -- or undefined while it tracks the
   // session content instead (a pinned workpiece, or a gadget with no committed code), which
-  // cannot go stale within an epoch: everything that changes it is the model's own edit or a
-  // user/mainline change shown to it as a diff. The one way knowledge goes stale is another
-  // chat's accept moving an unpinned gadget's head, and a stamp is checked against the head at
+  // cannot go stale within an epoch: everything that changes it is the model's own edit, a
+  // user's change shown to it as a diff, or a re-root, which drops the knowledge of what it
+  // changed (see applyReplayedPin). The one way knowledge goes stale is another chat's accept
+  // moving an unpinned gadget's head, and a stamp is checked against the head at
   // the two points where it would otherwise be trusted: editFile's gate on an unpinned gadget,
   // and the establishment of a pin (anchorKnowledgeToPin), after which reads are session-served
   // and the gate is skipped. At an epoch boundary session-tracking entries take an oid stamp of
@@ -1609,7 +1862,12 @@ async function runAgentPass(
   // Establishes a pin's base tree in the session content during replay and marks the gadget
   // pinned. Idempotent: commits are immutable, so re-establishing the same base is harmless --
   // which is what lets ensureReplayContentForWrite below establish a base *early*.
-  let applyReplayedPin = async (pin: ChatGadgetPin) => {
+  //
+  // A declaration for a gadget already pinned re-roots it (see ChatGadgetPinRecord): the
+  // session content restarts at the new base, and what the model knows of a file whose text
+  // that changed is dropped, so editFile requires a re-read rather than match against text the
+  // model saw before. Returns the names of those files, sorted, for telling the model.
+  let applyReplayedPin = async (pin: ChatGadgetPin): Promise<string[]> => {
     if (hooks.isWorktree(pin.gadgetId)) {
       // A worktree's base is a whole repository tree, so it is never materialized: the entry
       // holds only touched/read files, resolved lazily against the pinned base (accumulated
@@ -1621,13 +1879,25 @@ async function runAgentPass(
         sessionContent.set(pin.gadgetId, new Map());
       }
       pinnedGadgets.add(pin.gadgetId);
-      return;
+      return [];
     }
     let files = await hooks.readCommitFiles(pin.baseCommit);
+    let known = filesRead.get(pin.gadgetId);
+    let forgotten: string[] = [];
+    if (pinnedGadgets.has(pin.gadgetId) && known !== undefined) {
+      let before = sessionContent.get(pin.gadgetId);
+      for (let [filename, stamp] of known) {
+        if (stamp === undefined && before?.get(filename) !== files.get(filename)) {
+          known.delete(filename);
+          forgotten.push(filename);
+        }
+      }
+    }
     sessionContent = new Map(sessionContent);
     sessionContent.set(pin.gadgetId, files);
     pinnedGadgets.add(pin.gadgetId);
     await anchorKnowledgeToPin(pin.gadgetId, pin.baseCommit);
+    return forgotten.toSorted();
   };
 
   // Ensures the session content holds a base for a replayed write's target workpiece -- or, for
@@ -2181,11 +2451,26 @@ async function runAgentPass(
         // the converted content is not what those writes produced).
         if (msg.conversionBoundary) await resetSessionEpoch();
 
+        // A blueprint that the user applied is described to the model (see
+        // formatBlueprintProposal). Its message has no change, only the pin at the merge
+        // commit, which is applied below. A proposal since reverted is described all the same:
+        // the description is what the turn that reviewed it was answering, and the revert is
+        // reported where it happened. (An entry on a message of the agent's own is a gadget it
+        // created from a blueprint, which the model already sees in its createGadget call.)
+        for (let merge of msg.author.type === "user" ? msg.blueprintMerges ?? [] : []) {
+          modelMessages.push({
+            role: "user",
+            content: await formatBlueprintProposal(merge, msg, chatNameFor(merge.gadgetId), hooks),
+            timestamp: msgTimestamp,
+          });
+        }
+
         if (chatMessageStatus.get(msg.sequence) !== "reverted") {
           // Pins this batch establishes enter the content before the change applies (a no-op for
           // gadgets ensureReplayContentForWrite already established early; see there).
+          let forgotten = new Map<WorkpieceId, string[]>();
           for (let pin of msg.pins ?? []) {
-            await applyReplayedPin(pin);
+            forgotten.set(pin.gadgetId, await applyReplayedPin(pin));
           }
           // A batch with no `change` records only creations/binding additions; there is nothing to
           // apply to the session content (and no diff), but user-authored creations/additions
@@ -2212,6 +2497,22 @@ async function runAgentPass(
               observations.push(
                   `Added binding "${name}" to ` +
                   (gadgetName !== undefined ? `gadget ${gadgetName}` : `a gadget`) + `.`);
+            }
+            if (msg.mainlineMerge?.gadgets !== undefined) {
+              // An update from mainline is a re-root with no change, described by its commits
+              // (see formatMainlineMerge). One recorded before merges were commits has a change
+              // instead, which is shown as a diff like any other.
+              let summaries: string[] = [];
+              for (let entry of msg.mainlineMerge.gadgets) {
+                let name = chatNameFor(entry.gadgetId);
+                let declaration = msg.pins?.find(pin => pin.gadgetId === entry.gadgetId);
+                if (name === undefined || declaration === undefined) continue;
+                summaries.push(await formatMainlineMerge(entry, declaration, name,
+                    forgotten.get(entry.gadgetId) ?? [], hooks));
+              }
+              if (summaries.length > 0) {
+                observations.push(MAINLINE_MERGE_INTRO, ...summaries);
+              }
             }
             if (diff !== undefined) {
               observations.push(diff);
@@ -3229,7 +3530,7 @@ async function runAgentPass(
             emitStreamEvent({type: "toolCallOutputFormat", toolCallId, output: blueprint.output});
           }
 
-          let created = hooks.createGadget(title, bindingName, chatId, blueprint?.output);
+          let created = hooks.createGadget(title, bindingName, chatId, blueprint);
           pendingCreatedGadgets.push({gadgetId: created.id, title: created.title, bindingName});
           chatBindings.set(bindingName, {type: "workpiece", id: created.id});
 
@@ -3250,6 +3551,12 @@ async function runAgentPass(
             if (fileChanges.length > 0) {
               appendAgentEdit(created.id, {[created.id]: fileChanges});
             }
+            // Recorded with the creation, so that accepting it writes the release into the new
+            // gadget's history and has the gadget follow the blueprint -- but only now that the
+            // gadget has the release's files. The copy fails if the step has no room left for
+            // it, and a gadget recorded as made from files it never got would pass for up to
+            // date with the blueprint.
+            pendingBlueprintMerges.push({gadgetId: created.id, ...blueprint.merge});
             // (The files are deliberately NOT added to filesRead: unlike a writeFile, the agent
             // hasn't seen their contents, so it must read before editing.)
 
@@ -3688,9 +3995,11 @@ async function runAgentPass(
         pendingAddedBindings = [];
         let worktreeCommits = pendingWorktreeCommits;
         pendingWorktreeCommits = [];
+        let blueprintMerges = pendingBlueprintMerges;
+        pendingBlueprintMerges = [];
         if (await hooks.commitAgentStep(chatId, author, msgs,
             {changes: stepChanges, createdGadgets, createdWorktrees, addedBindings,
-             worktreeCommits},
+             worktreeCommits, blueprintMerges},
             message.usage, handle.lastResponse?.aiGatewayLogId, handle.aiGatewayLogRoute)) {
           ++nextChangeId;
         }

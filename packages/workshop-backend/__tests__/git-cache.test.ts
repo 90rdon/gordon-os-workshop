@@ -11,14 +11,17 @@ import {
   MAX_GIT_OBJECT_SIZE,
   WorkspaceGitCache,
 } from "../src/git-cache";
-import { GitStore, blobOid } from "../src/git-store";
+import { buildSnapshotRelease } from "../src/blueprint-release";
+import { GITDIR, GitStore, blobOid, makeGitObjectsFs } from "../src/git-store";
 import { makeOverseerStorage } from "../src/storage-schema/overseer-storage";
 import {
   buildPackBytes,
   concatBytes,
+  encodeGitTree,
   encodeLooseObject,
   gitObjectOid,
   parseGitTree,
+  type GitTreeEntry,
   type PackableObject,
 } from "../src/git-codec";
 import {
@@ -39,6 +42,7 @@ import {
 // Gatekeeper workpiece ids and action ids used throughout.
 const G1 = 7;
 const G2 = 8;
+const G3 = 9;
 const ACTION = 101;
 const OTHER_ACTION = 102;
 
@@ -112,12 +116,62 @@ function commitPayload(tree: GitOid, parents: GitOid[], message: string): Uint8A
   return new TextEncoder().encode(text);
 }
 
+// Stores a commit locally, distinguished from every other by its message.
+async function storeCommit(t: TestCache, message: string, parents: GitOid[] = [])
+    : Promise<GitOid> {
+  return await storeLocal(
+      t.storage, { type: "commit", payload: commitPayload(TREE_1, parents, message) });
+}
+
+// Counts the object records written from here on.
+function countPuts(t: TestCache): { count: number } {
+  let puts = { count: 0 };
+  let put = t.storage.gitObjects.put.bind(t.storage.gitObjects);
+  t.storage.gitObjects.put = record => {
+    puts.count++;
+    put(record);
+  };
+  return puts;
+}
+
 function treePayload(entries: { mode: string, name: string, oid: GitOid }[]): Uint8Array {
   return concatBytes(entries.flatMap(entry => [
     new TextEncoder().encode(`${entry.mode} ${entry.name}\0`),
     Uint8Array.from(entry.oid.match(/../g)!.map(h => parseInt(h, 16))),
   ]));
 }
+
+// Every way an object reaches the store. `by` is the gatekeeper whose remote the arrival proves
+// has the object, if it proves that of any.
+const ARRIVALS: {
+  route: string,
+  by?: number,
+  deliver: (t: TestCache, object: PackableObject) => Promise<unknown>,
+}[] = [
+  {
+    route: "a gatekeeper's put",
+    by: G3,
+    deliver: (t, object) => t.cache.putFromGatekeeper(G3, object.type, object.payload),
+  },
+  {
+    route: "an import",
+    deliver: (t, object) => t.cache.importObjects([object]),
+  },
+  {
+    // As isomorphic-git writes a loose object, through the fs that GitStore hands it.
+    route: "a GitStore write",
+    deliver: async (t, object) => {
+      let oid = await gitObjectOid(object.type, object.payload);
+      await makeGitObjectsFs(t.storage.gitObjects).promises.writeFile(
+          `${GITDIR}/objects/${oid.slice(0, 2)}/${oid.slice(2)}`,
+          encodeLooseObject(object.type, object.payload));
+    },
+  },
+];
+
+// TREE_1's `docs` subtree and the one file in it: an object two levels beneath the tree.
+const DOCS_TREE = "59d380616a33d90ddb4d4b887032e13d37590bf4";
+const DOCS_FILE = "78a3978560a66a1d3c14215ecbf2be19d70c5c43";
 
 function listMarks(storage: TestStorage, actionId: number): GitOid[] {
   return Array.from(storage.gitObjectMetadata.byPendingPushAction.get(actionId))
@@ -208,6 +262,119 @@ describe("puts and metadata recording", () => {
     let parent = t.storage.gitObjectMetadata.get("3ce192c633c20aae321cbeef73bdaed35ff0771a")!;
     expect(parent.pullableFrom).toStrictEqual([G1]);
     expect(parent.type).toBe("commit");
+  });
+
+  for (let { route, by, deliver } of ARRIVALS) {
+    it(`extends an absent object's sources to its referents when it arrives by ${route}`,
+        async () => {
+      let t = makeCache();
+      // Two remotes are recorded as having TREE_1, by commits of theirs that refer to it.
+      await t.cache.putFromGatekeeper(G1, "commit", fixture(COMMIT_1).payload);
+      await t.cache.putFromGatekeeper(G2, "commit", commitPayload(TREE_1, [], "same tree"));
+      let entries = parseGitTree(fixture(TREE_1).payload, TREE_1)
+          .filter(entry => entry.mode !== "160000");
+      for (let entry of entries) {
+        expect(t.storage.gitObjectMetadata.get(entry.oid)).toBeUndefined();
+      }
+      let expectSourcesOfEntries = (sources: number[]) => {
+        for (let entry of entries) {
+          let meta = t.storage.gitObjectMetadata.get(entry.oid)!;
+          expect(meta.pullableFrom.toSorted()).toStrictEqual(sources);
+          expect(meta.onRemote).toStrictEqual([]);  // a claim, however sure its origin
+        }
+      };
+
+      // Whoever has the tree has its entries, wherever these bytes came from.
+      await deliver(t, fixture(TREE_1));
+      expectSourcesOfEntries(by === undefined ? [G1, G2] : [G1, G2, by]);
+      expect(t.storage.gitObjectMetadata.get(GITLINK_TARGET)).toBeUndefined();
+      expect(t.storage.gitObjectMetadata.get(TREE_1)!.onRemote)
+          .toStrictEqual(by === undefined ? [] : [by]);
+
+      // So does a remote later proven to have the tree, though the tree is already here.
+      await t.cache.putFromGatekeeper(G3, "tree", fixture(TREE_1).payload);
+      expectSourcesOfEntries([G1, G2, G3]);
+    });
+  }
+
+  for (let { route, by, deliver } of ARRIVALS) {
+    it(`extends sources through an object that arrived before its parent, by ${route}`,
+        async () => {
+      let t = makeCache();
+      t.sources.set(G1, fixtureSource(t, G1));
+      await t.cache.putFromGatekeeper(G1, "commit", fixture(COMMIT_1).payload);
+
+      // The subtree comes first, as a pack is free to order it, when nothing yet says that
+      // G1 has it. Then the tree that G1 is recorded as having.
+      await deliver(t, fixture(DOCS_TREE));
+      await deliver(t, fixture(TREE_1));
+      expect(t.storage.gitObjectMetadata.get(DOCS_FILE)!.pullableFrom.toSorted())
+          .toStrictEqual(by === undefined ? [G1] : [G1, by]);
+      // Which is what lets the file be pulled at all.
+      expect((await t.cache.ensureObject(DOCS_FILE, { type: "blob" })).type).toBe("blob");
+    });
+  }
+
+  it("extends a source that a held object gains later, as far down as objects are held",
+      async () => {
+    let t = makeCache();
+    await t.cache.importObjects([fixture(COMMIT_1), fixture(TREE_1), fixture(DOCS_TREE)]);
+    expect(Array.from(t.storage.gitObjectMetadata.list())).toStrictEqual([]);
+
+    t.cache.advertiseCommit(G1, COMMIT_1);
+    let entries = parseGitTree(fixture(TREE_1).payload, TREE_1)
+        .filter(entry => entry.mode !== "160000");
+    for (let oid of [COMMIT_1, TREE_1, ...entries.map(entry => entry.oid), DOCS_FILE]) {
+      expect(t.storage.gitObjectMetadata.get(oid)!.pullableFrom).toStrictEqual([G1]);
+    }
+    // `src` is not held, so nothing can be said yet about what is in it.
+    let src = entries.find(entry => entry.name === "src")!;
+    for (let entry of parseGitTree(fixture(src.oid).payload, src.oid)) {
+      expect(t.storage.gitObjectMetadata.get(entry.oid)).toBeUndefined();
+    }
+  });
+
+  it("does not walk again beneath an object the gatekeeper is already a source of", async () => {
+    let t = makeCache();
+    await t.cache.importObjects([fixture(COMMIT_1), fixture(TREE_1), fixture(DOCS_TREE)]);
+    t.cache.advertiseCommit(G1, COMMIT_1);
+    await t.cache.putFromGatekeeper(G2, "tree", fixture(TREE_1).payload);
+
+    let reads = 0;
+    let get = t.storage.gitObjects.get.bind(t.storage.gitObjects);
+    t.storage.gitObjects.get = oid => {
+      reads++;
+      return get(oid);
+    };
+    // G1 is a source of the commit by claim, and G2 of its tree by proof.
+    t.cache.advertiseCommit(G1, COMMIT_1);
+    await t.cache.putFromGatekeeper(G2, "commit", commitPayload(TREE_1, [], "same tree"));
+    expect(reads).toBe(0);
+    // The hint itself is still recorded on the tree; it is the walk beneath it that is spared.
+    expect(t.storage.gitObjectMetadata.get(TREE_1)!.pullableFrom).toStrictEqual([G1, G2]);
+  });
+
+  it("looks inside an arriving object whatever type it was claimed to be", async () => {
+    let t = makeCache();
+    // G1's tree lists TREE_1 as a file, which is all that is recorded about it.
+    await t.cache.putFromGatekeeper(
+        G1, "tree", treePayload([{ mode: "100644", name: "not-a-file", oid: TREE_1 }]));
+    expect(t.storage.gitObjectMetadata.get(TREE_1)!.type).toBe("blob");
+
+    await t.cache.importObjects([fixture(TREE_1)]);
+    let readme = parseGitTree(fixture(TREE_1).payload, TREE_1)[0];
+    expect(t.storage.gitObjectMetadata.get(readme.oid)!.pullableFrom).toStrictEqual([G1]);
+  });
+
+  it("records nothing about what an object refers to when nothing is recorded about it",
+      async () => {
+    let t = makeCache();
+    let store = new GitStore(t.storage.gitObjects);
+    await store.writeFilesAsCommit(new Map([["a.txt", "a\n"], ["dir/b.txt", "b\n"]]), {
+      parents: [], author: { name: "A", email: "a@b" }, message: "m", timestamp: new Date(0),
+    });
+    expect(Array.from(t.storage.gitObjects.list())).toHaveLength(5);
+    expect(Array.from(t.storage.gitObjectMetadata.list())).toStrictEqual([]);
   });
 
   it("records advertisements as assertion-grade hints, distinct from proof", async () => {
@@ -599,6 +766,92 @@ describe("isAncestor", () => {
 
 // =======================================================================================
 
+describe("mergeBases", () => {
+  it("is the older of two commits on one line of history", async () => {
+    let t = makeCache();
+    let root = await storeCommit(t, "root");
+    let mid = await storeCommit(t, "mid", [root]);
+    let head = await storeCommit(t, "head", [mid]);
+    expect(t.cache.mergeBases(mid, head)).toStrictEqual([mid]);
+    expect(t.cache.mergeBases(head, mid)).toStrictEqual([mid]);
+    expect(t.cache.mergeBases(head, head)).toStrictEqual([head]);
+  });
+
+  it("is where two histories forked, not what came before", async () => {
+    let t = makeCache();
+    let root = await storeCommit(t, "root");
+    let fork = await storeCommit(t, "fork", [root]);
+    let left = await storeCommit(t, "left 2", [await storeCommit(t, "left 1", [fork])]);
+    let right = await storeCommit(t, "right", [fork]);
+    expect(t.cache.mergeBases(left, right)).toStrictEqual([fork]);
+  });
+
+  it("finds the release two lineages share, then the one a merge recorded", async () => {
+    // The git-blueprints plan's picture. Carol's gadget took Alice's a3 and switches to Bob's
+    // blueprint, whose b1 was built on a2.
+    let t = makeCache();
+    let a1 = await storeCommit(t, "a1");
+    let a2 = await storeCommit(t, "a2", [a1]);
+    let a3 = await storeCommit(t, "a3", [a2]);
+    let b1 = await storeCommit(t, "b1", [await storeCommit(t, "b0"), a2]);
+    let instantiated = await storeCommit(t, "i", [await storeCommit(t, "e"), a3]);
+    let c1 = await storeCommit(t, "c1", [instantiated]);
+    expect(t.cache.mergeBases(c1, b1)).toStrictEqual([a2]);
+
+    // Her accept writes [c1, b1], so the next update from Bob is based on b1.
+    let merged = await storeCommit(t, "m", [c1, b1]);
+    let b2 = await storeCommit(t, "b2", [b1]);
+    expect(t.cache.mergeBases(merged, b2)).toStrictEqual([b1]);
+    // And b1 itself is now simply an ancestor.
+    expect(t.cache.mergeBases(merged, b1)).toStrictEqual([b1]);
+  });
+
+  it("returns every best common ancestor of a criss-cross", async () => {
+    let t = makeCache();
+    let root = await storeCommit(t, "root");
+    let x1 = await storeCommit(t, "x1", [root]);
+    let y1 = await storeCommit(t, "y1", [root]);
+    let x2 = await storeCommit(t, "x2", [x1, y1]);
+    let y2 = await storeCommit(t, "y2", [y1, x1]);
+    expect(t.cache.mergeBases(x2, y2).toSorted()).toStrictEqual([x1, y1].toSorted());
+  });
+
+  it("returns nothing for histories with no commit in common", async () => {
+    let t = makeCache();
+    let left = await storeCommit(t, "left", [await storeCommit(t, "left root")]);
+    let right = await storeCommit(t, "right", [await storeCommit(t, "right root")]);
+    expect(t.cache.mergeBases(left, right)).toStrictEqual([]);
+  });
+
+  it("stops where a chain leaves the cache, and never pulls", async () => {
+    let t = makeCache();
+    // Both sides name a parent that is not held, though G1 advertises it.
+    let absent = "d".repeat(40);
+    t.cache.advertiseCommit(G1, absent);
+    let left = await storeCommit(t, "left", [absent]);
+    let right = await storeCommit(t, "right", [absent]);
+    expect(t.cache.mergeBases(left, right)).toStrictEqual([absent]);
+    // What lies beyond it is unseen, so nothing connects these two.
+    let other = await storeCommit(t, "other", ["e".repeat(40)]);
+    expect(t.cache.mergeBases(left, other)).toStrictEqual([]);
+    expect(t.pulls).toHaveLength(0);
+  });
+
+  it("throws when either commit is not a locally cached commit", async () => {
+    let t = makeCache();
+    let head = await storeCommit(t, "head");
+    let blob = await storeLocal(t.storage, { type: "blob", payload: new Uint8Array() });
+    for (let other of ["a".repeat(40), blob]) {
+      expect(() => t.cache.mergeBases(head, other))
+          .toThrow(`${other} is not a commit in the workspace's git cache`);
+      expect(() => t.cache.mergeBases(other, head))
+          .toThrow(`${other} is not a commit in the workspace's git cache`);
+    }
+  });
+});
+
+// =======================================================================================
+
 describe("the marking walk", () => {
   it("marks the closure, skipping remote-known objects without descending", async () => {
     let t = await setupCrossRemote();
@@ -652,18 +905,43 @@ describe("the marking walk", () => {
     ]);
   });
 
-  it("propagates marks lazily when a marked-absent object's bytes arrive", async () => {
+  for (let { route, deliver } of ARRIVALS) {
+    it(`propagates marks lazily when a marked-absent object arrives by ${route}`, async () => {
+      let t = await setupCrossRemote({ materializeTree: false });
+      t.cache.markPushClosure(G2, ACTION, [t.child]);
+      // Only the child and the absent TREE_1 could be marked so far.
+      expect(new Set(listMarks(t.storage, ACTION))).toStrictEqual(new Set([t.child, TREE_1]));
+
+      // TREE_1 arrives: its children become visible and inherit the mark.
+      await deliver(t, fixture(TREE_1));
+      let marked = new Set(listMarks(t.storage, ACTION));
+      for (let entry of parseGitTree(fixture(TREE_1).payload, TREE_1)) {
+        expect(marked.has(entry.oid)).toBe(entry.mode !== "160000");
+      }
+    });
+  }
+
+  for (let { route, deliver } of ARRIVALS) {
+    it(`marks through an object that arrived before its marked parent, by ${route}`,
+        async () => {
+      let t = await setupCrossRemote({ materializeTree: false });
+      t.cache.markPushClosure(G2, ACTION, [t.child]);
+      await deliver(t, fixture(DOCS_TREE));
+      expect(pendingPushOf(t.storage, DOCS_FILE)).toStrictEqual([]);
+      await deliver(t, fixture(TREE_1));
+      expect(pendingPushOf(t.storage, DOCS_FILE))
+          .toStrictEqual([{ gatekeeperId: G2, actionId: ACTION }]);
+    });
+  }
+
+  it("does not mark what the destination is recorded as having, as an object arrives",
+      async () => {
     let t = await setupCrossRemote({ materializeTree: false });
     t.cache.markPushClosure(G2, ACTION, [t.child]);
-    // Only the child and the absent TREE_1 could be marked so far.
+    // The destination turns out to have TREE_1 after all, so has everything in it.
+    await t.cache.putFromGatekeeper(G2, "commit", commitPayload(TREE_1, [], "dest has tree"));
+    await t.cache.importObjects([fixture(TREE_1)]);
     expect(new Set(listMarks(t.storage, ACTION))).toStrictEqual(new Set([t.child, TREE_1]));
-
-    // TREE_1 arrives (any gatekeeper): its children become visible and inherit the mark.
-    await t.cache.putFromGatekeeper(G1, "tree", fixture(TREE_1).payload);
-    let marked = new Set(listMarks(t.storage, ACTION));
-    for (let entry of parseGitTree(fixture(TREE_1).payload, TREE_1)) {
-      expect(marked.has(entry.oid)).toBe(entry.mode !== "160000");
-    }
   });
 });
 
@@ -766,6 +1044,19 @@ describe("buildPack", () => {
     expect(t2.cache.readLocalObject(t.child)!.type).toBe("commit");
   });
 
+  it("packs the whole closure though a marked tree arrived outside any pull", async () => {
+    let t = await setupCrossRemote({ materializeTree: false });
+    t.cache.markPushClosure(G2, ACTION, [t.child]);
+    // The same tree turns up in, say, a blueprint. The pack still needs everything under it,
+    // which is still to be pulled from where the tree was recorded as being.
+    await t.cache.importObjects([fixture(TREE_1)]);
+
+    let pack = await collect(await new GitCacheImpl(t.cache, G2, ACTION).buildPack());
+    expect(await decodePack(pack)).toHaveLength(11);
+    expect(t.pulls.every(pull => pull.gatekeeperId === G1)).toBe(true);
+    expect(t.pulls.some(pull => pull.oids.includes(TREE_1))).toBe(false);
+  });
+
   it("builds an empty pack when the whole declaration is already remote-known", async () => {
     let t = await setupCrossRemote();
     t.cache.markPushClosure(G2, ACTION, [t.ancestor]);  // already onRemote: nothing marked
@@ -801,6 +1092,16 @@ describe("consumePack", () => {
     }
     // Referent recording ran: the gitlink target still has no row.
     expect(t.storage.gitObjectMetadata.get(GITLINK_TARGET)).toBeUndefined();
+  });
+
+  it("extends sources whatever order the pack delivers its objects in", async () => {
+    let t = makeCache();
+    await t.cache.putFromGatekeeper(G1, "commit", fixture(COMMIT_1).payload);
+    // G2's pack has the subtree ahead of the tree that G1 is recorded as having.
+    let pack = concatBytes(await buildPackBytes([fixture(DOCS_TREE), fixture(TREE_1)]));
+    await t.cache.consumePackFromGatekeeper(G2, byteStream(pack));
+    expect(t.storage.gitObjectMetadata.get(DOCS_FILE)!.pullableFrom.toSorted())
+        .toStrictEqual([G1, G2]);
   });
 
   it("consumes a pack another Worker streams in, as a gatekeeper's arrives", async () => {
@@ -913,6 +1214,75 @@ describe("consumePack", () => {
     expect(stored).toStrictEqual([await gitObjectOid("blob", target)]);
     expect(t.cache.readLocalObject(stored[0])!.payload).toStrictEqual(target);
     expect(t.storage.gitObjectMetadata.get(bigOid)!.size).toBe(big.byteLength);
+  });
+});
+
+// =======================================================================================
+
+describe("importObjects", () => {
+  const FILES = new Map([["client.js", "render();\n"], ["lib/util.js", "export {};\n"]]);
+
+  it("stores a release's objects, invisible to every gatekeeper's scoped view", async () => {
+    let t = makeCache();
+    let { commitId, objects } = await buildSnapshotRelease(FILES);
+    await t.cache.importObjects(objects.values());
+
+    for (let [oid, object] of objects) {
+      expect(t.cache.readLocalObject(oid)).toStrictEqual(object);
+      for (let gatekeeperId of [G1, G2]) {
+        let stub = new GitCacheImpl(t.cache, gatekeeperId);
+        expect(await stub.get(oid)).toBeNull();
+        expect(await stub.has(oid)).toBe(false);
+        expect(await stub.stat(oid)).toBeNull();
+      }
+    }
+    expect(Array.from(t.storage.gitObjectMetadata.list())).toStrictEqual([]);
+    // The workspace's own reads see them like any commit authored here.
+    expect(await t.cache.readFileAtCommit(commitId, "lib/util.js")).toBe("export {};\n");
+    expect(t.pulls).toHaveLength(0);
+  });
+
+  it("leaves an object already held, and its metadata, as they are", async () => {
+    let t = makeCache();
+    let { objects } = await buildSnapshotRelease(FILES);
+    let shared = await t.cache.putFromGatekeeper(
+        G1, "blob", new TextEncoder().encode("render();\n"));
+    expect(objects.has(shared)).toBe(true);
+    let metadata = Array.from(t.storage.gitObjectMetadata.list());
+
+    let puts = countPuts(t);
+    await t.cache.importObjects(objects.values());
+    expect(puts.count).toBe(objects.size - 1);
+    expect(Array.from(t.storage.gitObjectMetadata.list())).toStrictEqual(metadata);
+    expect(await new GitCacheImpl(t.cache, G1).has(shared)).toBe(true);
+    expect(await new GitCacheImpl(t.cache, G2).has(shared)).toBe(false);
+
+    // Importing it all again, each object twice over, writes nothing.
+    await t.cache.importObjects([...objects.values(), ...objects.values()]);
+    expect(puts.count).toBe(objects.size - 1);
+  });
+
+  it("stores each object under the oid of its content", async () => {
+    let t = makeCache();
+    let payload = new TextEncoder().encode("hello world\n");
+    await t.cache.importObjects([{ type: "blob", payload }]);
+    // `echo 'hello world' | git hash-object --stdin`
+    expect(Array.from(t.storage.gitObjects.list(), record => record.oid))
+        .toStrictEqual(["3b18e512dba79e4c8300dd08aeb37f8e728b8dad"]);
+  });
+
+  it("imports everything or nothing", async () => {
+    let t = makeCache();
+    let { objects } = await buildSnapshotRelease(FILES);
+    let puts = countPuts(t);
+    let put = t.storage.gitObjects.put;
+    t.storage.gitObjects.put = record => {
+      if (puts.count === objects.size - 1) throw new Error("storage refused the record");
+      put(record);
+    };
+    await expect(t.cache.importObjects(objects.values())).rejects.toThrow(/storage refused/);
+    expect(puts.count).toBe(objects.size - 1);
+    expect(Array.from(t.storage.gitObjects.list())).toStrictEqual([]);
   });
 });
 
@@ -1242,6 +1612,80 @@ describe("client-facing reads (readCommitTree / readFilesAtCommit)", () => {
     t.sources.delete(G1);  // provenance loss: the only source is gone
     await expect(t.cache.readFilesAtCommit(COMMIT_1, ["README.md", "nope.txt"]))
         .rejects.toThrow(/Could not pull git object/);
+  });
+});
+
+// =======================================================================================
+
+describe("changedFilePathsBetween", () => {
+  // A tree, described as nested objects: a string is a regular file's text, an object a
+  // directory. An `Executable` is a file of mode 100755, and a `Subtree` names a tree by id,
+  // stored or not.
+  class Executable { constructor(readonly text: string) {} }
+  class Subtree { constructor(readonly oid: GitOid) {} }
+  type TreeSpec = { [name: string]: string | Executable | Subtree | TreeSpec };
+
+  async function storeTree(t: TestCache, spec: TreeSpec): Promise<GitOid> {
+    let storeBlob = async (text: string) =>
+        await storeLocal(t.storage, { type: "blob", payload: new TextEncoder().encode(text) });
+    let entries: GitTreeEntry[] = [];
+    for (let [name, value] of Object.entries(spec)) {
+      if (typeof value === "string") {
+        entries.push({ mode: "100644", name, oid: await storeBlob(value) });
+      } else if (value instanceof Executable) {
+        entries.push({ mode: "100755", name, oid: await storeBlob(value.text) });
+      } else if (value instanceof Subtree) {
+        entries.push({ mode: "40000", name, oid: value.oid });
+      } else {
+        entries.push({ mode: "40000", name, oid: await storeTree(t, value) });
+      }
+    }
+    return await storeLocal(t.storage, { type: "tree", payload: encodeGitTree(entries) });
+  }
+  async function storeTreeCommit(t: TestCache, spec: TreeSpec): Promise<GitOid> {
+    return await storeLocal(t.storage,
+        { type: "commit", payload: commitPayload(await storeTree(t, spec), [], "tree commit") });
+  }
+
+  it("lists added, removed and changed files at any depth, and a change of mode", async () => {
+    let t = makeCache();
+    let before = await storeTreeCommit(t, {
+      "keep.js": "keep\n",
+      "edit.js": "edit\n",
+      "gone.js": "gone\n",
+      "run.sh": "#!/bin/sh\n",
+      "src": { "top.js": "top\n", "lib": { "deep.js": "deep\n", "same.js": "same\n" } },
+      "docs": { "old.md": "old\n" },
+      "shape": "a file\n",
+    });
+    let after = await storeTreeCommit(t, {
+      "keep.js": "keep\n",
+      "edit.js": "edited\n",
+      "run.sh": new Executable("#!/bin/sh\n"),
+      "new.js": "new\n",
+      "src": { "top.js": "top\n",
+               "lib": { "deep.js": "deeper\n", "same.js": "same\n", "added.js": "added\n" } },
+      "shape": { "inner.js": "a file\n" },
+    });
+    let expected = new Set([
+      "edit.js", "gone.js", "run.sh", "new.js", "src/lib/deep.js", "src/lib/added.js",
+      "docs/old.md", "shape", "shape/inner.js",
+    ]);
+    expect(await t.cache.changedFilePathsBetween(before, after)).toStrictEqual(expected);
+    expect(await t.cache.changedFilePathsBetween(after, before)).toStrictEqual(expected);
+    expect(t.pulls).toHaveLength(0);
+  });
+
+  it("does not read a subtree that is the same on both sides", async () => {
+    let t = makeCache();
+    // Held nowhere: reading it would fail, as there is no source to pull it from.
+    let unheld = "ab".repeat(20);
+    let before = await storeTreeCommit(t, { "a.js": "a\n", "vendor": new Subtree(unheld) });
+    let after = await storeTreeCommit(t, { "a.js": "A\n", "vendor": new Subtree(unheld) });
+    expect(await t.cache.changedFilePathsBetween(before, after)).toStrictEqual(new Set(["a.js"]));
+    // Nor is a commit compared with itself read at all.
+    expect(await t.cache.changedFilePathsBetween(unheld, unheld)).toStrictEqual(new Set());
+    expect(t.pulls).toHaveLength(0);
   });
 });
 
