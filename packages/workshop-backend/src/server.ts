@@ -24,6 +24,7 @@ import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CL
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
 import { UserDirectoryDurableObject } from "./user-directory.js";
 import { SpaceDurableObject, checkSpaceKey, checkTeamSpaceKey, noSuchSpace, teamSpaceClaim } from "./spaces.js";
+import { DEFAULT_WORKSPACE_TITLE } from "./storage-schema/overseer-storage.js";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
@@ -342,7 +343,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async newGadget(spaceKey?: string): Promise<RpcStub<Overseer>> {
     if (spaceKey !== undefined) checkTeamSpaceKey(spaceKey);
     let id = this.overseers.newUniqueId().toString();
-    await this.#user.newGadget(id, "Untitled Workspace", spaceKey);
+    await this.#user.newGadget(id, DEFAULT_WORKSPACE_TITLE, spaceKey);
     recordAnalytics(this.ctx, this.env, {
       event_name: "gadget_created",
       user_id: this.#userId.toString(),
