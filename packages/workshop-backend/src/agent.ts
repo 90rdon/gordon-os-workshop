@@ -23,8 +23,8 @@ import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./
 import type { ModelHandle } from "./ai-models";
 import { blobOid } from "./git-store";
 import type {
-  AiChatAgentContext, ChatBindingEntry, CompactionCheckpoint, StoredAssistantMessage,
-  StoredChatMessage, StoredToolCall,
+  AiChatAgentContext, ChatBindingEntry, ChatEnvironmentRecord, CompactionCheckpoint,
+  EnvironmentPart, StoredAssistantMessage, StoredChatMessage, StoredToolCall,
 } from "./storage-schema/overseer-storage";
 import {
   buildCompactionState, buildSummaryPrompt, chatChangeStatuses, COMPACTION_SYSTEM_PROMPT,
@@ -185,12 +185,14 @@ export type SeedBindingInfo = {
 
 /**
  * The history one agent pass replays: the active compaction checkpoint, if any, the chat log from
- * it on, and the token total the provider reported for the chat's last model step (zero when none
- * is recorded). See AgentHooks.loadChatHistory.
+ * it on, the versions of the environment section the agent was told since then (see
+ * ChatEnvironmentRecord), and the token total the provider reported for the chat's last model step
+ * (zero when none is recorded). See AgentHooks.loadChatHistory.
  */
 export type ChatHistory = {
   checkpoint?: CompactionCheckpoint;
   chatMessages: StoredChatMessage[];
+  environments: ChatEnvironmentRecord[];
   measuredTokens: number;
 };
 
@@ -323,6 +325,9 @@ export interface AgentHooks {
    * the step: it sets the chat's token counts, and its catalog-priced `cost.total` is the cost
    * fallback. When both `aiGatewayLogId` and `aiGatewayLogRoute` are present, the authoritative
    * cost is fetched asynchronously from the AI Gateway log; otherwise the estimate is applied.
+   *
+   * `step.environment` is a version of the environment section the step's request carried for the
+   * first time (see ChatEnvironmentRecord), recorded in the same transaction.
    */
   commitAgentStep(chatId: number, author: AiChatAuthorInfo,
       msgs: AiChatMessageBodyWithModelData[],
@@ -333,6 +338,7 @@ export interface AgentHooks {
         addedBindings: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[],
         worktreeCommits: {worktreeId: WorkpieceId, commit: string, previousHead: string}[],
         blueprintMerges: BlueprintMerge[],
+        environment?: Omit<ChatEnvironmentRecord, "chatId">,
       },
       usage?: Usage, aiGatewayLogId?: string,
       aiGatewayLogRoute?: AiGatewayLogRoute): Promise<boolean>;
@@ -1121,6 +1127,36 @@ async function formatBlueprintProposal(
   return lines.join("\n");
 }
 
+// The note that tells the agent its environment changed from `before` to `after` (see
+// ChatEnvironmentRecord): the first line of each removed part, then each new or changed part in
+// full, naming the part it replaces if its first line changed. Removals come first so that a new
+// part with a removed part's first line reads as its replacement. Gadget titles and catalogs are
+// not trusted to close the framing, so any delimiter in them is stripped, as in the compaction
+// summary's framing.
+function environmentNote(before: EnvironmentPart[], after: EnvironmentPart[]): Message {
+  let firstLine = (part: EnvironmentPart) => part.text.split("\n", 1)[0];
+  let removed = before.filter(old => !after.some(part => part.key === old.key))
+      .map(old => `(Removed: the part that began: ${firstLine(old)})`);
+  let changed = after.flatMap(part => {
+    let previous = before.find(old => old.key === part.key);
+    if (previous === undefined || firstLine(previous) === firstLine(part)) {
+      return previous?.text === part.text ? [] : [part.text];
+    }
+    return [`(Replaces the part that began: ${firstLine(previous)})\n${part.text}`];
+  });
+  let body = [...removed, ...changed].join("\n\n")
+      .replace(/<\/?\s*environment_update\b[^>]*>/gi, "");
+  return {
+    role: "user",
+    content:
+        `<environment_update note="Machine-generated update to the environment your system ` +
+        `prompt describes. Each part below is new, or replaces the part there that began with ` +
+        `its first line or with the line it names. A part marked Removed no longer applies.">\n` +
+        `${body}\n</environment_update>`,
+    timestamp: 0,
+  };
+}
+
 let READ_FILE_TOOL_DESCRIPTION = `
 Read the content of a file owned by a workpiece (a gadget or worktree) in your \`env\`. If a file changes after you read it, you will either be informed of the change or the outdated result will be replaced with a note telling you to re-read the file; otherwise there is no need to read a file again after you have already read it once. This cannot read chat attachments; attachments are provided directly in the conversation.
 
@@ -1438,7 +1474,7 @@ async function runAgentPass(
     handle: ModelHandle,
     chatId: number,
     author: AiChatAuthorInfo,
-    {checkpoint, chatMessages, measuredTokens}: ChatHistory,
+    {checkpoint, chatMessages, environments, measuredTokens}: ChatHistory,
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
     modelConfig: AiModelConfig): Promise<AgentPassOutcome> {
@@ -1805,6 +1841,22 @@ async function runAgentPass(
     modelMessageSources.push({});
   }
 
+  // Each later version of the environment section reaches the agent as a note just before the
+  // record that was newest when the agent was told it (see ChatEnvironmentRecord). A note is never
+  // a cut point, so compaction cuts where it would without notes.
+  let environmentNotes = environments.slice(1).map((version, index) => ({
+    beforeSequence: version.beforeSequence,
+    message: environmentNote(environments[index].parts, version.parts),
+  }));
+  let pushEnvironmentNotes = (beforeSequence: number) => {
+    while (environmentNotes.length > 0 && environmentNotes[0].beforeSequence <= beforeSequence) {
+      let note = environmentNotes[0];
+      modelMessages.push(note.message);
+      modelMessageSources.push({sequence: note.beforeSequence, canCut: false});
+      environmentNotes.shift();
+    }
+  };
+
   // Run through the chat log to process all "merge" and "revert" messages in order to mark
   // which messages lie in merged or reverted ranges. This serves two purposes:
   // 1. Let us know which changes should not be applied when building the Y.Doc of the current
@@ -1995,8 +2047,8 @@ async function runAgentPass(
   };
 
   // Always-available resources (e.g. the Context Library) describe the agent's environment, so
-  // they're announced in the system prompt (slot 1, below) alongside the bindings list rather
-  // than as a synthetic user turn.
+  // they're announced in the system prompt's environment (below) alongside the bindings list
+  // rather than as a synthetic user turn.
   let alwaysAvailable = seedBindings.filter(seed => seed.catalog !== undefined);
   let alwaysAvailableResourcesPrompt = alwaysAvailable.length > 0
       ? formatAlwaysAvailableResourcesPrompt(alwaysAvailable.map(seed =>
@@ -2016,6 +2068,7 @@ async function runAgentPass(
   }
 
   for (let [msgIndex, msg] of chatMessages.entries()) {
+    pushEnvironmentNotes(msg.sequence);
     let modelMessageStart = modelMessages.length;
     let msgTimestamp = msg.timestamp.getTime();
     switch (msg.type) {
@@ -2707,6 +2760,7 @@ async function runAgentPass(
       });
     }
   }
+  pushEnvironmentNotes(Infinity);
 
   // The step buffer: the current step's tool edits, applied to the session content as they
   // buffer but durable (and broadcast) only at the step's persistence barrier
@@ -2826,17 +2880,17 @@ async function runAgentPass(
       workpiece => hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId));
   let executeCodeStreamManager = new ExecuteCodeStreamManager(emitStreamEvent);
 
-  // Deployment-wide admin instructions, appended to the static system slot (slot 0) so they stay
+  // Deployment-wide admin instructions, appended to the system prompt's instructions so they stay
   // inside the Anthropic prompt cache window. "" when unset.
   let instanceInstructions = formatInstanceInstructions(await hooks.getInstanceInstructions());
 
-  // The two system prompt slots: the non-project-specific parts, followed by the
-  // project-specific parts. They become the leading system message's content and its one
-  // section, which pi renders as `${slot0}\n\n${slot1}`. On APIs with cache breakpoints, the
-  // model handle sends that as two blocks with a breakpoint between them (see
-  // system-prompt-blocks.ts), so the static prefix stays cached when the project-specific part
-  // changes.
-  let systemPromptSlots: [string, string];
+  // The system prompt: the non-project-specific instructions, followed by the project-specific
+  // environment. They become the leading system message's content and its one section, which pi
+  // renders as `${content}\n\n${environment}`. On APIs with cache breakpoints, the model handle
+  // sends that as two blocks with a breakpoint between them (see system-prompt-blocks.ts), so the
+  // instructions stay cached across chats.
+  let systemPromptContent: string;
+  let environment: EnvironmentPart[];
 
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt. Spawned agents see only the
@@ -2858,36 +2912,37 @@ async function runAgentPass(
           `You have access to the following bindings via the \`env\` object:\n${lines.join("\n")}`;
     }
 
-    // Split the system prompt into static and dynamic parts for better caching. How the task is
-    // delivered depends on how the chat was spawned, and for a callable agent includes the
-    // chat-specific (but stable across the chat) interface, so that goes in the second slot.
-    systemPromptSlots = [
-      SPAWNER_SYSTEM_PROMPT,
-      [
-        agentContext.spawnerTypes
+    // How the task is delivered depends on how the chat was spawned, and for a callable agent
+    // includes the chat-specific (but stable across the chat) interface, so it belongs to the
+    // environment.
+    systemPromptContent = SPAWNER_SYSTEM_PROMPT;
+    environment = [
+      {
+        key: "task",
+        text: agentContext.spawnerTypes
             ? formatCallableAgentPrompt(agentContext.spawnerTypes)
             : SPAWNED_TASK_PROMPT,
-        systemPromptBindings,
-        alwaysAvailableResourcesPrompt,
-      ].filter(part => part !== "").join("\n\n"),
+      },
+      {key: "bindings", text: systemPromptBindings},
+      {key: "resources", text: alwaysAvailableResourcesPrompt},
     ];
   } else {
     // This is a regular coding agent.
 
     // Let's include each gadget's list of files in the system prompt so that the agent doesn't
-    // have to call a tool to list files at the start of every thread. In order to avoid cache
-    // misses, we specifically list the files that existed at the start of the thread even if the
-    // agent adds or removes files during the thread. (An unpinned gadget's list can still change
-    // between turns if mainline moves -- a cache miss, but files rarely churn concurrently to a
-    // chat within the cache TTL.)
-    let systemPromptWorkspace: string;
+    // have to call a tool to list files at the start of every thread. The list stays as the
+    // chat's first turn saw it; a later change reaches the agent as a note (see below).
+    let workspaceParts: EnvironmentPart[];
     if (gadgetInfos.length == 0) {
-      systemPromptWorkspace =
-          "This workspace does not contain any gadgets yet. You can use connected resources " +
-          "and executeCode without one. Use `createGadget` tool only when the task calls for a new " +
-          "application or saved output, before writing that gadget's files.";
+      workspaceParts = [{
+        key: "gadgets",
+        text:
+            "This workspace does not contain any gadgets yet. You can use connected resources " +
+            "and executeCode without one. Use `createGadget` tool only when the task calls for a " +
+            "new application or saved output, before writing that gadget's files.",
+      }];
     } else {
-      let sections: string[] = [];
+      workspaceParts = [{key: "gadgets", text: "# This workspace's gadgets"}];
       for (let info of gadgetInfos) {
         // The file list follows the same pinned/unpinned split as readFile: an unpinned gadget
         // with committed code lists its head commit's files (the head fixed for this turn);
@@ -2909,11 +2964,9 @@ async function runAgentPass(
               `\`workpiece\` parameter is omitted.`);
         }
         if (files.length == 0) {
-          lines.push(`As of the start of this session, this gadget had no code files.`);
+          lines.push(`This gadget has no code files.`);
         } else {
-          lines.push(
-              `As of the start of this session, this gadget contained the following files:`,
-              ...files.map(f => `* ${f}`));
+          lines.push(`This gadget contains the following files:`, ...files.map(f => `* ${f}`));
         }
         if (info.output) {
           // When people are using common platform formats/outputs, most times people just want to use
@@ -2945,9 +2998,8 @@ async function runAgentPass(
                     : ` — (no binding for this in your env)`);
           }));
         }
-        sections.push(lines.join("\n"));
+        workspaceParts.push({key: `gadget:${info.id}`, text: lines.join("\n")});
       }
-      systemPromptWorkspace = `# This workspace's gadgets\n\n${sections.join("\n\n")}`;
     }
 
     // Named in the prompt because the request that should trigger them ("make me a doc") may
@@ -2962,7 +3014,7 @@ async function runAgentPass(
       systemPromptConnections = "";
     } else {
       systemPromptConnections =
-          `\n\nIf you need access to an external resource that isn't already a binding, you can ask ` +
+          `If you need access to an external resource that isn't already a binding, you can ask ` +
           `the user to connect one with the requestConnection tool (pre-configure it as much as you ` +
           `can; use listConnectableResources to learn a vendor's resource URL patterns first). The ` +
           `user accepts or denies in the chat. If they accept, you'll be resumed and the resource ` +
@@ -2974,22 +3026,45 @@ async function runAgentPass(
           `${connectableVendors.map(v => `* ${v.id}: ${v.displayName}`).join("\n")}`;
     }
 
-    // Split the system prompt into static and dynamic parts for better caching.
-    systemPromptSlots = [
-      SYSTEM_PROMPT,
-      (standardFormats ? `${standardFormats}\n\n` : "") +
-          `${systemPromptWorkspace}${systemPromptConnections}` +
-          (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
+    systemPromptContent = SYSTEM_PROMPT;
+    environment = [
+      {key: "formats", text: standardFormats},
+      ...workspaceParts,
+      {key: "connections", text: systemPromptConnections},
+      {key: "resources", text: alwaysAvailableResourcesPrompt},
     ];
   }
+  environment = environment.filter(part => part.text !== "");
 
   // Shared guidance precedes deployment instructions for both agent types.
-  systemPromptSlots[0] += `\n\n${COMMUNICATION_GUIDANCE}`;
+  systemPromptContent += `\n\n${COMMUNICATION_GUIDANCE}`;
   if (instanceInstructions) {
-    systemPromptSlots[0] += `\n\n${instanceInstructions}`;
+    systemPromptContent += `\n\n${instanceInstructions}`;
+  }
+
+  // The system prompt keeps the first version of the environment the agent was told, and later
+  // versions reach it as notes (see ChatEnvironmentRecord). Mid-turn, a change waits for the next
+  // turn: a note after a tool result would break into the agent's tool loop.
+  let toldEnvironment = environments.at(-1)?.parts;
+  let newestSequence = chatMessages.at(-1)?.sequence;
+  let environmentToRecord: Omit<ChatEnvironmentRecord, "chatId"> | undefined;
+  if (newestSequence !== undefined &&
+      JSON.stringify(toldEnvironment) !== JSON.stringify(environment) &&
+      (toldEnvironment === undefined || modelMessages.at(-1)?.role === "user")) {
+    environmentToRecord = {beforeSequence: newestSequence, parts: environment};
+    if (toldEnvironment !== undefined) {
+      // Where a replay will put it: before the newest record's own messages, if it has any.
+      let index = modelMessageSources.findIndex(source => source.sequence === newestSequence);
+      if (index < 0) index = modelMessages.length;
+      modelMessages.splice(index, 0, environmentNote(toldEnvironment, environment));
+      modelMessageSources.splice(index, 0, {sequence: newestSequence, canCut: false});
+    }
   }
   let systemMessage: SystemMessage = {
-    role: "system", content: systemPromptSlots[0], sections: {environment: systemPromptSlots[1]},
+    role: "system", content: systemPromptContent,
+    sections: {
+      environment: (environments[0]?.parts ?? environment).map(part => part.text).join("\n\n"),
+    },
     timestamp: 0,
   };
 
@@ -3997,9 +4072,11 @@ async function runAgentPass(
         pendingWorktreeCommits = [];
         let blueprintMerges = pendingBlueprintMerges;
         pendingBlueprintMerges = [];
+        let stepEnvironment = environmentToRecord;
+        environmentToRecord = undefined;
         if (await hooks.commitAgentStep(chatId, author, msgs,
             {changes: stepChanges, createdGadgets, createdWorktrees, addedBindings,
-             worktreeCommits, blueprintMerges},
+             worktreeCommits, blueprintMerges, environment: stepEnvironment},
             message.usage, handle.lastResponse?.aiGatewayLogId, handle.aiGatewayLogRoute)) {
           ++nextChangeId;
         }

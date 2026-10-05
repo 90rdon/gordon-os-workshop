@@ -713,6 +713,28 @@ type ChatModelDataRecord = {
   message: StoredAssistantMessage;
 };
 
+/**
+ * One part of the environment section of an agent's system prompt -- the project-specific text
+ * built for each pass (see runAgentPass) -- keyed so that a later version can name the parts that
+ * changed.
+ */
+export type EnvironmentPart = {key: string, text: string};
+
+/**
+ * One version of a chat's environment section, as the agent was told it since the chat's active
+ * compaction checkpoint (or its start). The first version is the one the system prompt carries.
+ * Each later one reaches the agent as a note in the chat, just before the record that was newest
+ * when the agent was told it, so that what the agent was already sent never changes and the
+ * provider can serve it from its prompt cache. Recorded with the first step of the agent pass that
+ * sent it (see AgentHooks.commitAgentStep), and deleted when the active checkpoint changes.
+ */
+export type ChatEnvironmentRecord = {
+  chatId: number;
+  /** The sequence of the record the note precedes. Unique per chat. */
+  beforeSequence: number;
+  parts: EnvironmentPart[];
+};
+
 // A call made on a callable agent (the `self` object or a spawnCallable() stub) that has not yet
 // been appended to its chat log. See the `pendingAgentCalls` collection.
 type PendingAgentCallRecord = {
@@ -1387,6 +1409,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // matching the step's "message" chat record.
       chatModelData: collection<ChatModelDataRecord>()({
         primaryKey: (entry: ChatModelDataRecord) => chatKey(entry.chatId, entry.sequence),
+      }),
+
+      // The versions of each chat's environment section (see ChatEnvironmentRecord). Keyed by
+      // chatId.beforeSequence.
+      chatEnvironments: collection<ChatEnvironmentRecord>()({
+        primaryKey: (record: ChatEnvironmentRecord) => chatKey(record.chatId, record.beforeSequence),
       }),
 
       collaborators: collection<CollaboratorRecord>()({

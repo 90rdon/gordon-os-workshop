@@ -10,7 +10,8 @@ import type {
 import { loadAllChatHistory } from "../src/agent-session.js";
 import { startTestGatekeeperHarness, TEST_VENDOR_ID, type Harness } from "../src/harness.js";
 import {
-  SCRIPTED_MODEL_ID, scriptedModelRouter, systemPromptOf, type RoutedScriptedModel,
+  environmentUpdatesOf, SCRIPTED_MODEL_ID, scriptedModelRouter, systemPromptOf,
+  type RoutedScriptedModel,
 } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
@@ -75,7 +76,7 @@ const codeOutputs = (messages: AiChatMessage[]) => messages.flatMap(message =>
   message.type === "message" ? message.toolCalls ?? [] : []).flatMap(call =>
     call.toolName === "executeCode" ? [call.output] : []);
 
-it.concurrent("the agent's prompt follows the workspace's gadgets and bindings", async () => {
+it.concurrent("the agent is told how the workspace's gadgets and bindings change", async () => {
   const model = models.script([{ text: "First." }, { text: "Second." }, { text: "Third." }]);
   using owner = await newWorkspace(model, "agentprompt");
   const { api, account, ws } = owner;
@@ -101,21 +102,26 @@ it.concurrent("the agent's prompt follows the workspace's gadgets and bindings",
     expect(first).toContain(format.blueprintId);
   }
 
-  // The rename lands on mainline; the binding is only proposed in another chat.
+  // The rename lands on mainline; the binding is only proposed in another chat. The system prompt
+  // stays as the chat's first turn saw it, so the rename arrives as a note naming the old heading.
   await board.setTitle("Quarterly roadmap");
   const chatB = await ws.newChat("Give the roadmap the extra data.", null);
   await board.bind("BOARD_EXTRA", await boardExtra.getId(), chatB);
   await ws.sendChatMessage(chatA, "And now?", SCRIPTED_MODEL_ID);
   await settle(ws, model, chatA, 2);
-  const second = systemPromptOf(model.requests[1]);
-  expect(second).toContain("Quarterly roadmap");
-  expect(second).not.toContain("Task board");
-  expect(second).not.toContain("BOARD_EXTRA");
+  expect(systemPromptOf(model.requests[1])).toBe(first);
+  const [renamed] = environmentUpdatesOf(model.requests[1]);
+  expect(renamed).toContain(`## Gadget BOARD: "Task board"`);
+  expect(renamed).toContain(`## Gadget BOARD: "Quarterly roadmap"`);
+  expect(renamed).not.toContain("BOARD_EXTRA");
+  expect(renamed).not.toContain("Meeting notes");
 
   expect(await ws.mergeChanges(chatB)).toEqual({ outcome: "merged" });
   await ws.sendChatMessage(chatA, "And after that change?", SCRIPTED_MODEL_ID);
   await settle(ws, model, chatA, 3);
-  expect(systemPromptOf(model.requests[2])).toContain("BOARD_EXTRA");
+  expect(systemPromptOf(model.requests[2])).toBe(first);
+  expect(environmentUpdatesOf(model.requests[2]))
+      .toEqual([renamed, expect.stringContaining("BOARD_EXTRA")]);
 });
 
 it.concurrent("a pasted link becomes a binding for that chat only", async () => {

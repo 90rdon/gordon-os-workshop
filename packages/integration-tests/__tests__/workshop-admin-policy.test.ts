@@ -6,7 +6,9 @@ import { openAgentSession } from "../src/agent-session.js";
 import {
   ADMIN_USERNAME, startTestGatekeeperHarness, TEST_VENDOR_ID, type Harness,
 } from "../src/harness.js";
-import { SCRIPTED_MODEL_ID, scriptedModelRouter, systemPromptOf } from "../src/mock-model.js";
+import {
+  environmentUpdatesOf, SCRIPTED_MODEL_ID, scriptedModelRouter, systemPromptOf,
+} from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
   connect, listConnectedAccounts, logIn, nextUsernames, signUp,
@@ -132,9 +134,13 @@ it("deployment instructions and format hints reach the agent but not the user", 
     await admin.updateFormat(document.blueprintId, { agentHint: "" });
 
     expect((await session.runTurn("Hello again.")).outcome).toEqual({ status: "completed" });
-    const cleared = systemPromptOf(model.requests[1]);
-    expect(cleared).not.toContain(marker);
-    expect(cleared).not.toContain(hint);
+    expect(systemPromptOf(model.requests[1])).not.toContain(marker);
+    // Format hints belong to the environment the system prompt describes, so a chat already under
+    // way learns of the change from a note.
+    const [formatsUpdate, ...others] = environmentUpdatesOf(model.requests[1]);
+    expect(others).toEqual([]);
+    expect(formatsUpdate).toContain(document.blueprintId);
+    expect(formatsUpdate).not.toContain(hint);
   } finally {
     await admin.setInstanceInstructions(instanceInstructions);
     await admin.updateFormat(document.blueprintId, { agentHint: document.agentHint });

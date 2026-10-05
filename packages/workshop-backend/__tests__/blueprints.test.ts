@@ -2239,10 +2239,12 @@ describe("having the agent review a blueprint merged into a gadget", () => {
       let chatId = await propose(workspace, alice.blueprintId, { modelId: "some-model" });
       let [summary] = userTexts((await runReview(impl, chatId))[0]);
 
-      // The summary is what the agent's review answered, so it stays where it was.
+      // The summary is what the agent's review answered, so it stays where it was. The revert
+      // brings back old.js, which the agent learns of from a note.
       await client.revertChanges(chatId, 0);
       let later = await askLater(impl, chatId, "Never mind.");
-      expect(userTexts(later)).toEqual([summary, "Never mind."]);
+      expect(userTexts(later))
+          .toEqual([summary, expect.stringContaining("* old.js\n"), "Never mind."]);
       expect(toolResultTexts(later)).toEqual(
           [expect.stringContaining("The user reverted all changes starting from change 0")]);
     });

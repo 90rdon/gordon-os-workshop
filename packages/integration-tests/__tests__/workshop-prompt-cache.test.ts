@@ -6,8 +6,11 @@ import { z } from "zod";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { openAgentSession } from "../src/agent-session.js";
 import { startTestGatekeeperHarness, TEST_VENDOR_ID, type Harness } from "../src/harness.js";
-import { SCRIPTED_MODEL_ID, scriptedModelRouter } from "../src/mock-model.js";
+import {
+  environmentUpdatesOf, SCRIPTED_MODEL_ID, scriptedModelRouter, systemPromptOf,
+} from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
+import { connect, nextUsernames, signUp, waitFor, waitForIdleChat } from "../src/rpc-client.js";
 
 let harness: Harness;
 const models = scriptedModelRouter();
@@ -64,4 +67,58 @@ it.concurrent("each request starts with the whole request before it", async () =
   expect((await session.runTurn("Is it the same now?")).outcome).toEqual({ status: "completed" });
   expect(model.requests).toHaveLength(3);
   expectEachRequestExtendsThePrevious(model.requests);
+});
+
+// The system prompt describes the workspace, so it stays as the chat's first turn saw it, and the
+// agent learns of a later change from a note just before the next user message.
+it.concurrent("a workspace change keeps each request a prefix of the next", async () => {
+  const model = models.script([
+    { toolCall: { id: "create", name: "createGadget",
+                  arguments: { title: "Meeting notes", bindingName: "NOTES" } } },
+    { text: "I created it." },
+    { text: "It is there." },
+  ]);
+  await using session = await openAgentSession(harness.url, {
+    modelId: SCRIPTED_MODEL_ID,
+    userModel: model.userModel,
+  });
+
+  expect((await session.runTurn("Make a notes gadget.")).outcome).toEqual({ status: "completed" });
+  await session.acceptChanges();
+  expect((await session.runTurn("Is it there?")).outcome).toEqual({ status: "completed" });
+  expect(model.requests).toHaveLength(3);
+  expectEachRequestExtendsThePrevious(model.requests);
+  expect(systemPromptOf(model.requests[2])).not.toContain("Meeting notes");
+  expect(environmentUpdatesOf(model.requests[2]))
+      .toEqual([expect.stringContaining(`## Gadget NOTES: "Meeting notes"`)]);
+});
+
+// Compaction rewrites the chat's history anyway, so the system prompt starts again from the
+// workspace as it is, and the notes before the cut are gone with the history they followed.
+it.concurrent("after compaction, the system prompt describes the workspace as it is", async () => {
+  const model = models.script([
+    // Over 85% of the scripted model's input budget, so turn 2 compacts first.
+    { text: "First reply.", usage: { prompt_tokens: 195_000, completion_tokens: 1, total_tokens: 195_001 } },
+    { text: "Summary of the first turn." },
+    { text: "Second reply." },
+  ]);
+  const [owner] = nextUsernames("promptcompact");
+  using publicApi = connect(harness.url);
+  using api = await signUp(publicApi, owner!);
+  await api.addModel(model.userModel.profile, model.userModel.config);
+  using ws = await api.newGadget();
+
+  const chatId = await ws.newChat("First question", SCRIPTED_MODEL_ID);
+  await waitFor("the first model request", async () => model.requests.length === 1 || null);
+  await waitForIdleChat(ws, chatId);
+  (await ws.createGadget("Meeting notes", undefined, "NOTES"))[Symbol.dispose]();
+  await ws.sendChatMessage(chatId, "Second question", SCRIPTED_MODEL_ID);
+  await waitFor("the summary and resumed requests", async () => model.requests.length === 3 || null);
+  await waitForIdleChat(ws, chatId);
+
+  const [first, , resumed] = model.requests;
+  expect(systemPromptOf(first)).not.toContain("Meeting notes");
+  expect(JSON.stringify(resumed)).toContain("<prior_conversation");
+  expect(systemPromptOf(resumed)).toContain("Meeting notes");
+  expect(environmentUpdatesOf(resumed)).toEqual([]);
 });

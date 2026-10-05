@@ -16,7 +16,8 @@ import {
   type ActionRecord, type ActiveAgentRecord, type AgentSpawnerBindingProps,
   type AiChatAgentContext, type BindingRecord,
   type BlueprintGadgetRecord, type BoundHookRecord, type ChatBindingEntry,
-  type ChatChangeBoundaryRecord, type ChatChangeRecord, type CompactionCheckpoint,
+  type ChatChangeBoundaryRecord, type ChatChangeRecord, type ChatEnvironmentRecord,
+  type CompactionCheckpoint,
   type ExternalChatRecord, type ExternalMessageRecord, type GadgetRecord, type GatekeeperCaller,
   type GatekeeperClass, type GatekeeperRecord, type ObserverRecord, type OverseerStorage,
   type StoredAssistantMessage, type StoredChatMessage, type StoredChatMetadata,
@@ -700,6 +701,12 @@ class OverseerImpl implements AgentHooks {
   // is asked again on the next activation, so every chat converges. Ids are never reused, so an
   // entry outliving its record is inert.
   #catalogless = new Set<number>();
+
+  // The catalog each ambient connection last returned, which stands in for one that fails to load.
+  // Catalogs are fetched from each gatekeeper every turn and can be large, and a chat learns of
+  // each change to its environment from a note that restates the part (see ChatEnvironmentRecord),
+  // so without this a failure would send the catalog's part twice: once without it, once with it.
+  #lastAgentCatalogs = new Map<number, AgentCatalog>();
 
   // If `alarm()` is currently waiting for all agents to finish, this resolves its wait. Invoked
   // when the running-agent count drops to zero.
@@ -2655,6 +2662,7 @@ class OverseerImpl implements AgentHooks {
         addedBindings: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[],
         worktreeCommits: {worktreeId: WorkpieceId, commit: string, previousHead: string}[],
         blueprintMerges: BlueprintMerge[],
+        environment?: Omit<ChatEnvironmentRecord, "chatId">,
       },
       usage?: Usage, aiGatewayLogId?: string,
       aiGatewayLogRoute?: AiGatewayLogRoute): Promise<boolean> {
@@ -2783,6 +2791,7 @@ class OverseerImpl implements AgentHooks {
           }
         }
 
+        if (step.environment) this.storage.chatEnvironments.put({chatId, ...step.environment});
         this.addChatMessages(chatId, author, msgs, usage, aiGatewayLogId, aiGatewayLogRoute);
         return this.materializeChatChanges(chatId, undefined, {
           author,
@@ -6417,6 +6426,7 @@ class OverseerImpl implements AgentHooks {
         prefix: chatKeyPrefix(chatId),
         start: checkpoint && chatKey(chatId, checkpoint.compactedTo),
       })],
+      environments: [...this.storage.chatEnvironments.list({prefix: chatKeyPrefix(chatId)})],
       measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
     };
   }
@@ -6438,6 +6448,7 @@ class OverseerImpl implements AgentHooks {
       // the next turn would weigh a short prompt's usage against a long one and never re-trigger.
       delete meta.totalTokens;
       this.storage.chatMeta.put(meta);
+      this.forgetChatEnvironments(chatId);
     });
   }
 
@@ -6462,7 +6473,17 @@ class OverseerImpl implements AgentHooks {
     if (meta.compactedTo !== previousBoundary) {
       // Replay now starts further back, so the prompt is longer than the recorded total describes.
       delete meta.totalTokens;
+      this.forgetChatEnvironments(meta.id);
     }
+  }
+
+  // The versions of a chat's environment section belong to the history from its active checkpoint
+  // on, so when that changes, the next turn's system prompt describes the environment afresh.
+  // Also part of deleting a chat.
+  forgetChatEnvironments(chatId: number): void {
+    // Buffer first: deleting invalidates the list cursor.
+    let versions = Array.from(this.storage.chatEnvironments.list({prefix: chatKeyPrefix(chatId)}));
+    for (let version of versions) this.storage.chatEnvironments.deleteRecord(version);
   }
 
   // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
@@ -6858,7 +6879,7 @@ class OverseerImpl implements AgentHooks {
     return [...this.storage.gadgets.list()]
         // Worktrees are never mentioned in the system prompt: they are created mid-chat by the
         // agent itself, so the createWorktree call and result in the chat history are the
-        // announcement, and a prompt line would break the prompt's byte-stability (caching).
+        // announcement, and a note in the environment would only repeat it.
         .filter((gadget): gadget is GadgetRecord => gadget.type === "gadget")
         .filter(gadget => !gadget.pending || gadget.pending.chatId === forChatId)
         .map(gadget => ({
@@ -7345,7 +7366,9 @@ class OverseerImpl implements AgentHooks {
               this.#catalogless.add(gatekeeperId);
               return [gatekeeperId, null];
             }
-            return [gatekeeperId, normalizeAgentCatalog(catalog)];
+            let normalized = normalizeAgentCatalog(catalog);
+            this.#lastAgentCatalogs.set(gatekeeperId, normalized);
+            return [gatekeeperId, normalized];
           } catch (error) {
             reportIssue("overseer.catalog-fallback", error, {
               handled: true,
@@ -7357,8 +7380,9 @@ class OverseerImpl implements AgentHooks {
               event: "agent.catalog.load.failed",
               gatekeeperId, resourceTitle: record.resourceTitle, error,
             });
-            // The next turn loads it again, so one failure costs this turn's catalog and no more.
-            return [gatekeeperId, null];
+            // The next turn loads it again; until then, the catalog this instance last loaded
+            // stands in.
+            return [gatekeeperId, this.#lastAgentCatalogs.get(gatekeeperId) ?? null];
           }
         })));
     if (dirty) {
@@ -11398,11 +11422,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.storage.pendingAgentCalls.deleteRecord(entry);
     }
 
-    // Clean up the chat's model-facing snapshots.
+    // Clean up the chat's model-facing snapshots and environment versions.
     for (let entry of this.impl.storage.chatModelData.list(
         {prefix: chatKeyPrefix(chatId)})) {
       this.impl.storage.chatModelData.deleteRecord(entry);
     }
+    this.impl.forgetChatEnvironments(chatId);
 
     // Defensively drop any resume record so a deleted chat is never resumed. (Aborting the agent
     // below also clears this via the tracked promise's finally, but the chat may have no live

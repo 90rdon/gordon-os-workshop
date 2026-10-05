@@ -41,15 +41,22 @@ function auxiliaryCompletion(body: unknown): AuxiliaryCompletion | undefined {
       completion => parsed.data.messages[0].content.startsWith(completion.promptPrefix));
 }
 
-const SYSTEM_PROMPT_REQUEST = z.object({
+const PROMPT_REQUEST = z.object({
   messages: z.array(z.object({ role: z.string(), content: z.unknown() })),
 });
 
 /** The system prompt of one recorded agent request. */
 export function systemPromptOf(request: unknown): string {
-  const system = SYSTEM_PROMPT_REQUEST.parse(request).messages.find(m => m.role === "system");
+  const system = PROMPT_REQUEST.parse(request).messages.find(m => m.role === "system");
   if (typeof system?.content !== "string") throw new Error("The request has no system prompt");
   return system.content;
+}
+
+/** A recorded agent request's notes updating the environment its system prompt describes. */
+export function environmentUpdatesOf(request: unknown): string[] {
+  return PROMPT_REQUEST.parse(request).messages.flatMap(m =>
+    m.role === "user" && typeof m.content === "string" &&
+        m.content.startsWith("<environment_update") ? [m.content] : []);
 }
 
 export const SCRIPTED_MODEL_ID = "@cf/zai-org/glm-5.2";
