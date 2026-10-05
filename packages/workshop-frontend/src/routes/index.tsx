@@ -15,7 +15,6 @@ import {
   ChatAttachmentHandle,
   MessageFormatRef,
   SlashCommandRequest,
-  isValidTeamSpaceKey,
 } from "@gadgets/workshop-shared/api";
 import {
   getStoredSelectedModel,
@@ -37,7 +36,7 @@ export const Route = createFileRoute("/")({
   component: HomePage,
   validateSearch: (search: Record<string, unknown>): HomeSearch => ({
     prompt: homePromptFromSearch(search.prompt),
-    space: spaceKeyFromSearch(search.space, isValidTeamSpaceKey),
+    space: spaceKeyFromSearch(search.space),
   }),
 });
 
