@@ -17,6 +17,7 @@ import {
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import { PersonAvatar } from './components/PersonAvatar'
 import { PeopleComposer, usePeopleComposer, withPerson, type StagedPerson } from './components/PeopleComposer'
+import { PublicAccessRow } from './features/spaces/PublicAccessRow'
 import { copyToClipboard } from './clipboard'
 import { isImeComposing } from './keyboardEvent'
 
@@ -43,6 +44,11 @@ type Props = {
   metadata: GadgetMetadata
   currentUser: AiChatAuthorInfo | null
   authenticatedApi: RpcStub<AuthenticatedApi>
+  /**
+   * The owner published the workspace with this role from the dialog, or with null withdrew the
+   * publication: for a caller whose own copy of the workspace's metadata does not follow it.
+   */
+  onPublicAccessChange?: (role: CollaboratorRole | null) => void
 }
 
 function formatRelativeTime(date: Date): string {
@@ -303,7 +309,9 @@ function sameRequirements(
     left.every((requirement, index) => requirement.gatekeeperId === right[index].gatekeeperId)
 }
 
-export default function ShareModal({ open, onClose, overseer, metadata, currentUser, authenticatedApi }: Props) {
+export default function ShareModal({
+  open, onClose, overseer, metadata, currentUser, authenticatedApi, onPublicAccessChange,
+}: Props) {
   const toasts = useKumoToastManager()
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
   const [membershipStatus, setMembershipStatus] = useState<'loading' | 'ready' | 'failed'>('loading')
@@ -1080,6 +1088,12 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                   </div>
                 )
               })}
+              <PublicAccessRow
+                overseer={overseer}
+                metadata={metadata}
+                container={menuContainer}
+                onChange={onPublicAccessChange}
+              />
             </div>
           </section>
 

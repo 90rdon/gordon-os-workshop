@@ -4,9 +4,10 @@ import { useState, useEffect, useRef, type ReactNode, type Ref } from 'react'
 import { DropdownMenu, Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from '../AuthContext'
-import { GadgetMetadataWithTimestamps, BlueprintPublicInfo, Overseer, AiChatAuthorInfo, SpaceInfo } from '@gadgets/workshop-shared/api'
+import { GadgetMetadataWithTimestamps, BlueprintPublicInfo, CollaboratorRole, Overseer, AiChatAuthorInfo, SpaceInfo } from '@gadgets/workshop-shared/api'
 import ShareModal from '../ShareModal'
 import { hasMoveTarget, MoveToSpaceDialog } from '../features/spaces/MoveToSpaceDialog'
+import { PublishedBadge } from '../features/spaces/PublishedBadge'
 import { isOwnPersonalSpace } from '../features/spaces/spaceKinds'
 import type { WorkspaceRowListing } from '../features/spaces/workspaceAddress'
 import { WorkspaceLink } from '../features/spaces/WorkspaceLink'
@@ -49,6 +50,7 @@ function AppRow({
   onRename,
   onMove,
   listing,
+  published,
   menuButtonRef,
 }: {
   gadget: GadgetMetadataWithTimestamps
@@ -64,6 +66,11 @@ function AppRow({
   onMove?: (gadget: GadgetMetadataWithTimestamps) => void
   /** What the entry a space lists the workspace under gives the row, where the caller has one. */
   listing?: WorkspaceRowListing
+  /**
+   * The role the workspace is published with, said on the row while the list is laid out under
+   * spaces.
+   */
+  published?: CollaboratorRole
   menuButtonRef?: Ref<HTMLButtonElement>
 }) {
   const [isRenaming, setIsRenaming] = useState(false)
@@ -125,6 +132,7 @@ function AppRow({
               {gadget.title || 'Untitled Workspace'}
             </h3>
           )}
+          {published && <PublishedBadge role={published} />}
         </div>
         {gadget.owner && (
           <p className="text-xs text-kumo-subtle truncate mt-0.5">
@@ -420,6 +428,10 @@ export default function GadgetList({ showHeader = true, sections }: {
       key={gadget.id}
       gadget={gadget}
       listing={listing}
+      // The user's own workspace says so by their record of it, which the Share dialog keeps up
+      // to date below; another person's by the entry a space lists it under, since the user's
+      // record of a workspace shared with them does not say whether it is published.
+      published={sections ? (gadget.owner ? listing?.published : gadget.publicAccess) : undefined}
       onDelete={handleDelete}
       onShare={handleShare}
       onInfo={setInfoTarget}
@@ -584,6 +596,8 @@ export default function GadgetList({ showHeader = true, sections }: {
           metadata={shareTarget}
           currentUser={userInfo}
           authenticatedApi={authenticatedApi}
+          onPublicAccessChange={(role) => setGadgets(prev => prev.map(g =>
+            g.id === shareTarget.id ? { ...g, publicAccess: role ?? undefined } : g))}
         />
       )}
 
