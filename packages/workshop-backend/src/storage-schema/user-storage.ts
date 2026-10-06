@@ -6,8 +6,8 @@
 
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import type {
-  AiChatAuthorInfo, AiModelConfig, BlueprintMetadata, BlueprintOutput, GadgetMetadata, SpaceInfo,
-  WorkpieceId,
+  AiChatAuthorInfo, AiModelConfig, BlueprintMetadata, BlueprintOutput, CollaboratorRole,
+  GadgetMetadata, SpaceInfo, WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import type { AccountDescription, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 
@@ -83,11 +83,15 @@ type LibraryBlueprintRecord = {
 
 /**
  * The two one-way flags of a workspace (`GadgetMetadata.containsRestrictedData` and
- * `ownerInvitesOnly`) as its Overseer states them, each one present. The Overseer sends them to
- * its owner's User DO with every call that can lead to a space listing the workspace.
+ * `ownerInvitesOnly`) as its Overseer states them, each one present, and with them the role the
+ * workspace is published with (`GadgetMetadata.publicAccess`), absent when it is not published,
+ * and how many times that role has changed (`publicAccessRevision`, absent for none). The
+ * Overseer sends them to its owner's User DO with every call that can lead to a space listing
+ * the workspace.
  */
 export type WorkspaceRestrictions =
-    Required<Pick<GadgetMetadata, "containsRestrictedData" | "ownerInvitesOnly">>;
+    Required<Pick<GadgetMetadata, "containsRestrictedData" | "ownerInvitesOnly">>
+    & Pick<GadgetMetadata, "publicAccess"> & { publicAccessRevision?: number };
 
 export type GadgetRecord = GadgetMetadata & {
   created: Date;
@@ -100,10 +104,21 @@ export type GadgetRecord = GadgetMetadata & {
   // and absent means it has never reported. A space lists a workspace only while both are false:
   // one that is set, or was never reported, keeps it out of every listing (see
   // UserDurableObject.#reconcileSpace()). A record of a workspace shared with the user has neither.
+  // `publicAccess` is stated with them and recorded likewise, except that it is not one-way: the
+  // record says what the statement made after the most changes of it said, and nothing while
+  // either flag is set.
+
+  /**
+   * How many changes of `publicAccess` the statement the record took it from came after (see
+   * WorkspaceRestrictions), absent for none. Set on the user's own workspaces only, and never
+   * sent to a client.
+   */
+  publicAccessRevision?: number;
 
   /**
    * What a space last acknowledged for this workspace: the key of the space listing it, personal
-   * or team, and the title listed there. It is the marker UserDurableObject.#reconcileSpace()
+   * or team, the title listed there and the role the entry says the workspace is published
+   * with, absent when it says none. It is the marker UserDurableObject.#reconcileSpace()
    * works from. For a workspace a space may list, the marker being absent, or different from
    * what the record now says, means the listing has yet to catch up; for one no space may list,
    * the marker being there at all does. Without `title`, the space has acknowledged nothing: it
@@ -113,7 +128,7 @@ export type GadgetRecord = GadgetMetadata & {
    * and the one the record points at. Set on the user's own workspaces only, and never sent to
    * a client.
    */
-  registered?: { spaceKey: string; title?: string };
+  registered?: { spaceKey: string; title?: string; published?: CollaboratorRole };
 };
 
 /**
