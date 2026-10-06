@@ -1,3 +1,36 @@
+# Gordon OS
+
+**Gordon OS is a personal fork of [Cloudflare OS](https://github.com/cloudflare/cloudflare-os)**, the open-source AI productivity environment built by Cloudflare. All of the core platform (agents, gadgets, blueprints, gatekeepers, the workshop runtime) is Cloudflare's work; this fork adds a rebrand and a few changes for running it as a small, invite-only workspace.
+
+> Gordon OS is an independent project. It is not affiliated with, endorsed by, or supported by Cloudflare, Inc. "Cloudflare" and "Cloudflare OS" are names of their respective owners.
+
+## What this fork changes
+
+- **Branding** — renamed to Gordon OS throughout the UI and connector pages; new color theme (navy `#121f45`, red `#db0a40`, yellow `#ffc906`) in light and dark modes; new favicon.
+- **Cloudflare Access sign-in behind a tunnel** — `run-local` passes `CF_ACCESS_AUD` / `CF_ACCESS_ISS` through to the backend, and the Access-gated API also accepts the public origin from `PUBLIC_BASE_URL`, so the app can sit behind `cloudflared` with users signed in by their Access identity (no separate username/password).
+- **Share by email before first sign-in** — under Access SSO, sharing a workspace with an email that hasn't signed in yet creates that account up front (after the normal sharing permission checks, and only if sign-ups are enabled), so the share is waiting for them.
+- **Allowlist sync (optional)** — with `CF_ACCESS_ADMIN_TOKEN`, `CF_ACCESS_ACCOUNT_ID`, `CF_ACCESS_POLICY_ID` and `CF_ACCESS_ADMIN_IDS` set, an admin who shares with a new email also adds it to the Access policy's allowlist; other users can only share with emails already on it. See `packages/workshop-backend/src/access-allowlist.ts`.
+
+The full list of changes is the commit history of the `gordon-os` branch relative to `main`.
+
+## Staying up to date with Cloudflare OS
+
+`main` tracks upstream unchanged; Gordon OS lives on the `gordon-os` branch (the default branch of this fork).
+
+```sh
+git fetch upstream            # upstream = https://github.com/cloudflare/cloudflare-os
+git checkout gordon-os
+git merge upstream/main
+```
+
+## License
+
+Licensed under the Apache License 2.0, the same as Cloudflare OS — see [LICENSE](LICENSE). Original work © Cloudflare, Inc. and contributors; modifications in this fork are noted above and in the commit history.
+
+---
+
+*Everything below is the original Cloudflare OS README, kept as-is for reference.*
+
 # Cloudflare OS: An AI productivity environment
 
 Cloudflare OS is an "operating system" for AI productivity originally developed for use inside Cloudflare. A large portion of Cloudflare's workforce -- from engineering to sales and everything in between -- uses Cloudflare OS every day to help them do their jobs.
