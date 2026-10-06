@@ -1,9 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cloudflare OS">
-  <path
-    d="M32 8 52.8 20v24L32 56 11.2 44V20L32 8Z"
-    fill="none"
-    stroke="#ff4801"
-    stroke-width="7"
-    stroke-linejoin="round"
-  />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Gordon OS">
+  <path d="M32 6 54.5 19v26L32 58 9.5 45V19L32 6Z" fill="#121f45"/>
+  <path d="M32 14 47.6 23v18L32 50 16.4 41V23L32 14Z" fill="none" stroke="#db0a40" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="5.5" fill="#ffc906"/>
 </svg>

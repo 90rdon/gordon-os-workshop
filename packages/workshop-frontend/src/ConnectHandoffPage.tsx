@@ -14,11 +14,11 @@ type Outcome = { title: string; detail: string; failed?: true }
 
 const INVALID: Outcome = {
   title: "This link isn't valid",
-  detail: 'Reload the Workshop and start the connection again.',
+  detail: 'Reload Gordon OS and start the connection again.',
 }
 const SIGNED_OUT: Outcome = {
   title: "You're signed out",
-  detail: 'Sign in to the Workshop and start the connection again.',
+  detail: 'Sign in to Gordon OS and start the connection again.',
 }
 const CLOSE_HINT = 'You can close this window.'
 

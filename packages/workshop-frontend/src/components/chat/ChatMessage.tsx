@@ -67,7 +67,7 @@ export default function ChatMessage({ message }: { message: ChatMessageType }) {
         {/* Role + time */}
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold text-kumo-default">
-            {isUser ? 'You' : 'Workshop'}
+            {isUser ? 'You' : 'Gordon OS'}
           </span>
           <span className="font-mono text-xs text-kumo-subtle">{message.timestamp}</span>
         </div>

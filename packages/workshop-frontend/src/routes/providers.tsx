@@ -78,7 +78,7 @@ function ModelRow({
             </span>
           )}
           {isQuick && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[rgba(255,72,1,0.10)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.4px] text-kumo-brand">
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[rgba(219,10,64,0.10)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.4px] text-kumo-brand">
               <Lightning size={9} weight="fill" />
               quick
             </span>
