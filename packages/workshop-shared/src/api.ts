@@ -1870,6 +1870,7 @@ const SUGGESTED_MODEL_CATALOG = {
     },
   },
   "google": {
+    "gemini-3.8-flash": {name: "Gemini 3.8 Flash", contextWindow: 1048576},
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
   },
   "ollama": {
