@@ -171,7 +171,7 @@ const INVALID_LINK_HTML = `<!DOCTYPE html>
   <body style="font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
     <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
       <h1 style="color: #b45309; font-size: 1.5rem;">Authorization Link Expired</h1>
-      <p style="color: #555; line-height: 1.6;">This authorization link is invalid or has expired. Please return to Cloudflare OS and try again.</p>
+      <p style="color: #555; line-height: 1.6;">This authorization link is invalid or has expired. Please return to Gordon OS and try again.</p>
     </div>
   </body>
 </html>`;
@@ -321,7 +321,7 @@ export default {
     if (relPath === "/oauth") {
       const error = url.searchParams.get("error");
       if (error) {
-        return new Response("Supabase authorization failed. Please restart the connection flow from Cloudflare OS.", {
+        return new Response("Supabase authorization failed. Please restart the connection flow from Gordon OS.", {
           status: 400,
           headers: { "Content-Type": "text/plain; charset=utf-8" },
         });
@@ -368,7 +368,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       color: "#f0fdf4",
       tagline: "Query Postgres, inspect schema, and manage projects",
       description:
-          "Connect your Supabase account so Cloudflare OS can run SQL against your project databases, " +
+          "Connect your Supabase account so Gordon OS can run SQL against your project databases, " +
           "explore schema, and inspect edge functions and storage for the projects you choose.",
     };
   }

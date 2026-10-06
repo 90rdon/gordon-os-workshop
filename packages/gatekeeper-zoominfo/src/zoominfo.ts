@@ -179,7 +179,7 @@ const INVALID_LINK_HTML = `<!DOCTYPE html>
   <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
     <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
       <h1 style="color: #EE3524; font-size: 1.5rem; margin: 0 0 1rem 0;">Authorization Link Expired</h1>
-      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to Cloudflare OS and try again.</p>
+      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to Gordon OS and try again.</p>
       <button onclick="window.close()" style="padding: 0.5rem 1.5rem; background: #EE3524; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer;">Close</button>
     </div>
   </body>
@@ -305,7 +305,7 @@ export default {
       const error = url.searchParams.get("error");
       if (error) {
         return new Response(
-          "ZoomInfo authorization failed or was denied. Please restart the connection flow from Cloudflare OS.",
+          "ZoomInfo authorization failed or was denied. Please restart the connection flow from Gordon OS.",
           { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } },
         );
       }
@@ -348,7 +348,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       color: "#EE3524",
       tagline: "Search and enrich B2B company & contact intelligence",
       description:
-        "Connect your ZoomInfo account so Cloudflare OS can resolve filter values, search companies, " +
+        "Connect your ZoomInfo account so Gordon OS can resolve filter values, search companies, " +
         "contacts, intent signals, scoops, and news, and enrich matched records into full detail. " +
         "Search is free; enrichment consumes ZoomInfo credits. Build agents that assemble target " +
         "account lists, research accounts, and prioritize outreach on buying signals.",

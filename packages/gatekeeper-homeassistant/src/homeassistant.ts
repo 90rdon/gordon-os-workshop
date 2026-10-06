@@ -214,7 +214,7 @@ const CONNECT_FORM_HTML = (params: { actionUrl: string; error?: string }) => `<!
 <body>
   <div class="card">
     <h1>Connect Home Assistant</h1>
-    <p>Provide the URL of your Home Assistant instance and a long-lived access token. Cloudflare OS will use these to read entity states and control devices.</p>
+    <p>Provide the URL of your Home Assistant instance and a long-lived access token. Gordon OS will use these to read entity states and control devices.</p>
     ${params.error ? `<div class="error">${escapeHtml(params.error)}</div>` : ""}
     <form method="POST" action="${escapeAttr(params.actionUrl)}">
       <label for="baseUrl">Home Assistant URL</label>
@@ -232,7 +232,7 @@ const CONNECT_FORM_HTML = (params: { actionUrl: string; error?: string }) => `<!
           <li>Click your username in the bottom-left corner.</li>
           <li>Select the <b>Security</b> tab.</li>
           <li>Scroll to the bottom and click <b>Create Token</b> under "Long-lived access tokens".</li>
-          <li>Give it a name like "Cloudflare OS", then copy the token and paste it above.</li>
+          <li>Give it a name like "Gordon OS", then copy the token and paste it above.</li>
         </ol>
       </details>
 
@@ -247,7 +247,7 @@ const INVALID_LINK_HTML = `<!DOCTYPE html>
 <head><meta charset="UTF-8"><title>Link Expired</title></head>
 <body style="font-family: system-ui, sans-serif; padding: 2rem; text-align: center;">
   <h2 style="color: #d97706;">Authorization Link Expired</h2>
-  <p>This connection link is invalid or has expired. Please return to Cloudflare OS and start over.</p>
+  <p>This connection link is invalid or has expired. Please return to Gordon OS and start over.</p>
 </body>
 </html>`;
 
@@ -357,7 +357,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       logo: HOMEASSISTANT_ICON,
       tagline: "Control your smart home, read sensor state, and edit Lovelace dashboards.",
       description:
-          "Connect your Home Assistant instance so Cloudflare OS can read entity state, call services " +
+          "Connect your Home Assistant instance so Gordon OS can read entity state, call services " +
           "to control devices, edit dashboards, and render templates. Build agents that automate " +
           "your home, alert on sensor changes, or generate custom dashboards.",
     };

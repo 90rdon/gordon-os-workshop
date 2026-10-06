@@ -1523,7 +1523,7 @@ export type GitOid = string;
 /**
  * Types of git objects.
  *
- * (The "tag" type is a tag annotation object; this type isn't really used by Cloudflare OS
+ * (The "tag" type is a tag annotation object; this type isn't really used by Gordon OS
  * workspaces but is included here because it is one of the four git object types.)
  */
 export type GitObjectType = "commit" | "tree" | "blob" | "tag";
@@ -1691,7 +1691,7 @@ export type GitPullHints = {
    *
    * The overseer uses this to request shallow clones. In fact, the overseer typically always
    * requests only shallow clones, which is why this property is required: the intuitive default
-   * would be to request a full clone, but that is almost never what we want in Cloudflare OS.
+   * would be to request a full clone, but that is almost never what we want in Gordon OS.
    */
   commitHistory:
     | { kind: "full" }
