@@ -60,6 +60,12 @@ declare global {
       // Cloudflare Access (SSO). (Also referenced via a local Env extension in server.ts.)
       CF_ACCESS_AUD?: string;   // audience
       CF_ACCESS_ISS?: string;   // team URL, e.g. https://<team>.cloudflareaccess.com
+      // Optional: keep the Access policy's email allowlist in step with sharing (see
+      // access-allowlist.ts). CF_ACCESS_ADMIN_TOKEN is an "Access: Apps and Policies: Edit" token.
+      CF_ACCESS_ADMIN_TOKEN?: string;
+      CF_ACCESS_ACCOUNT_ID?: string;
+      CF_ACCESS_POLICY_ID?: string;
+      CF_ACCESS_ADMIN_IDS?: string;   // comma-separated profile ids allowed to extend the allowlist
 
       // Comma-separated allowlist of gatekeeper vendor ids permitted to drive sign-in (e.g.
       // "google,github,cloudflare"). A listed gatekeeper must also advertise providesAuth. Empty =

@@ -555,6 +555,7 @@ for (const gk of gatekeepers) {
     "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_USE_BINDING",
     // Cloudflare Access SSO: when set, the backend signs users in from the Access JWT.
     "CF_ACCESS_AUD", "CF_ACCESS_ISS",
+    "CF_ACCESS_ADMIN_TOKEN", "CF_ACCESS_ACCOUNT_ID", "CF_ACCESS_POLICY_ID", "CF_ACCESS_ADMIN_IDS",
   ];
   // OAuth app credentials (GOOGLE_/GITHUB_/CLOUDFLARE_OAUTH_*) are NOT passed to the backend anymore;
   // they are injected into the gatekeeper Workers (see SHARED_GATEKEEPER_CREDS below).

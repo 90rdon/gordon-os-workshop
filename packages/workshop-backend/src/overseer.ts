@@ -50,6 +50,7 @@ import { GitImpl } from "./git-binding";
 import { scanWorkpieceForGrep, type GrepScan } from "./grep";
 import WORKTREE_BINDING_TYPES from "./worktree-binding.txt";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
+import { accessAllowlistEnabled, addEmailToAllowlist, isAccessAllowlistAdmin, isEmailAllowlisted } from "./access-allowlist";
 import { chatChangeStatuses } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import {
@@ -11598,6 +11599,22 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
+    // Under Access SSO with allowlist sync on, sharing with an email also governs the front door:
+    // a site admin's share adds the email to the Access allowlist; anyone else may only share
+    // with emails already on it. Authorize the share first so nothing changes for a caller who
+    // couldn't share anyway.
+    let recipientEmail = username.trim().toLowerCase();
+    if (this.impl.env.CF_ACCESS_AUD && accessAllowlistEnabled(this.impl.env) &&
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+      (await this.impl.getSharingManager()).assertCanAddCollaborator(this.#sharingCaller(), role);
+      if (isAccessAllowlistAdmin(this.impl.env, this.#sharingCaller().profileId)) {
+        await addEmailToAllowlist(this.impl.env, recipientEmail);
+      } else if (!(await isEmailAllowlisted(this.impl.env, recipientEmail))) {
+        throw new Error(
+            "That person isn't allowed to sign in yet. Ask the site owner to invite them.");
+      }
+    }
+
     // Look up the user DO to check if the account exists.
     let userDoId = this.impl.users.idFromName(username);
     let userDo = this.impl.users.get(userDoId);
