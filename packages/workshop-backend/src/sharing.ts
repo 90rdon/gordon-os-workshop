@@ -263,6 +263,22 @@ export class SharingManager {
    * grant a role higher than their own effective role. Once `ownerInvitesOnly` is set, only the
    * owner may call this.
    */
+  /**
+   * Throws unless `caller` may add a collaborator at `role` -- the same caller-side checks
+   * addCollaborator applies, so a caller can be authorized before any side effect (e.g.
+   * provisioning the recipient's account) happens.
+   */
+  assertCanAddCollaborator(caller: SharingCaller, role: CollaboratorRole): void {
+    if (this.ownerInvitesOnly() && !caller.isOwner) {
+      throw new Error(
+          "Only the workspace owner can add people to a workspace that contains sensitive data.");
+    }
+    let callerRole = this.#requireCallerRole(caller);
+    if (roleRank(role) > roleRank(callerRole)) {
+      throw new Error("You cannot grant a role higher than your own.");
+    }
+  }
+
   addCollaborator(opts: {
     caller: SharingCaller;
     profile: AiChatAuthorInfo;

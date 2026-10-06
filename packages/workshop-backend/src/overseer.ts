@@ -11611,6 +11611,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       if (!this.impl.env.CF_ACCESS_AUD || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return null;
       }
+      // Authorize the share before creating anything, and honour the deployment's sign-up
+      // switch exactly as a first sign-in would.
+      (await this.impl.getSharingManager()).assertCanAddCollaborator(this.#sharingCaller(), role);
+      if (!(await readAdminConfig(this.impl.env)).signupsEnabled) {
+        return null;
+      }
       userDoId = this.impl.users.idFromName(email);
       userDo = this.impl.users.get(userDoId);
       await userDo.authenticateFromCfAccess(email, true);
