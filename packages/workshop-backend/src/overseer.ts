@@ -11603,7 +11603,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let userDo = this.impl.users.get(userDoId);
     let profile = await userDo.whoamiIfExists();
     if (!profile) {
-      return null;
+      // Under Cloudflare Access SSO, accounts are keyed by verified email and created on first
+      // sign-in. Pre-provision that same account when sharing to an email that hasn't signed in
+      // yet, so the share is waiting for them. Only Access-allowlisted emails can ever sign in,
+      // so an account provisioned for anyone else is unreachable.
+      let email = username.trim().toLowerCase();
+      if (!this.impl.env.CF_ACCESS_AUD || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return null;
+      }
+      userDoId = this.impl.users.idFromName(email);
+      userDo = this.impl.users.get(userDoId);
+      await userDo.authenticateFromCfAccess(email, true);
+      profile = await userDo.whoamiIfExists();
+      if (!profile) {
+        return null;
+      }
     }
 
     return (await this.impl.getSharingManager()).addCollaborator({
