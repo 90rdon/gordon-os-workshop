@@ -97,8 +97,8 @@ Only the event id, event type, task id (`<workspaceId>:<chatId>`), bounded chat 
 subscription id, and same-origin deep-link path cross the central boundary during a send.
 Permission details, chat content, gatekeeper grants, and provider credentials do not. A visible
 browser tab is offered the notification first, and push is sent only if no tab acknowledges it
-within three seconds. Turns started by a gadget callback, such as a schedule, notify only when
-they need the user's permission.
+within three seconds. Only turns a person started announce completion; callback turns, such as a
+schedule, and spawned agents notify only when they need the user's permission.
 
 ## Deployment contract
 
