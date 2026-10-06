@@ -534,9 +534,14 @@ for (const gk of gatekeepers) {
 
   config.services = config.services || [];
 
-  // For local testing, create an account named "admin" to test admin features.
+  // For local testing, create an account named "admin" to test admin features. ADMINS in the
+  // shell (comma-separated usernames, or a JSON array) overrides it, e.g. for an SSO deployment
+  // whose usernames are emails.
   config.vars = config.vars || {};
-  config.vars.ADMINS = ["admin"];
+  let adminsEnv = process.env.ADMINS?.trim();
+  config.vars.ADMINS = !adminsEnv ? ["admin"]
+      : adminsEnv.startsWith("[") ? JSON.parse(adminsEnv)
+      : adminsEnv.split(",").map(s => s.trim()).filter(s => s !== "");
 
   // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
   // environment, so you can run e.g.
