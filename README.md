@@ -1,5 +1,9 @@
 # Gordon OS
 
+**An AI workspace for building human-centric tools for everyday work.**
+
+Gordon OS is where I design and build gadget apps: small, purpose-built applications that pair an AI agent with a focused interface. The aim is practical: take the repetitive parts of daily work off people's plates while keeping judgment, context, and final decisions with the humans doing the work.
+
 **Gordon OS is a personal fork of [Cloudflare OS](https://github.com/cloudflare/cloudflare-os)**, the open-source AI productivity environment built by Cloudflare. All of the core platform (agents, gadgets, blueprints, gatekeepers, the workshop runtime) is Cloudflare's work; this fork adds a rebrand and a few changes for running it as a small, invite-only workspace.
 
 > Gordon OS is an independent project. It is not affiliated with, endorsed by, or supported by Cloudflare, Inc. "Cloudflare" and "Cloudflare OS" are names of their respective owners.
