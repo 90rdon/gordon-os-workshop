@@ -891,7 +891,13 @@ export default {
       let accessPayload: JWTPayload | undefined;
 
       if (env.CF_ACCESS_AUD) {
-        if (req.headers.get("Origin") !== url.origin) {
+        // Behind a tunnel the Worker sees its local origin, while browsers send the public one
+        // (PUBLIC_BASE_URL); accept exactly those two.
+        let publicOrigin: string | undefined;
+        try { publicOrigin = env.PUBLIC_BASE_URL ? new URL(env.PUBLIC_BASE_URL).origin : undefined; }
+        catch { publicOrigin = undefined; }
+        let origin = req.headers.get("Origin");
+        if (origin !== url.origin && origin !== publicOrigin) {
           return new Response("Cross-origin API access not allowed.", { status: 403 });
         }
 
