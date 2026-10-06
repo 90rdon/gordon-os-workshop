@@ -1,4 +1,6 @@
-# Contributing to Cloudflare OS
+# Contributing to Gordon OS
+
+Gordon OS is a personal fork of [Cloudflare OS](https://github.com/cloudflare/cloudflare-os) and isn't seeking outside contributions. The policy below is upstream's, kept for reference; platform changes belong in the upstream repository.
 
 At this time, we are not seeking outside contribution.
 
